@@ -1,0 +1,12 @@
+{
+  "functions": {
+    "api/webhook.js": {
+      "maxDuration": 10
+    }
+  },
+  "env": {
+    "SHOPIFY_SHOP_DOMAIN": "@shopify_shop_domain",
+    "SHOPIFY_ACCESS_TOKEN": "@shopify_access_token",
+    "SHOPIFY_WEBHOOK_SECRET": "@shopify_webhook_secret"
+  }
+}
