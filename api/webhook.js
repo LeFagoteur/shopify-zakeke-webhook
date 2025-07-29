@@ -1,21 +1,15 @@
 import crypto from 'crypto';
 
 export default async function handler(req, res) {
-  // Vérifier que c'est une requête POST
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
   try {
-    // Vérifier l'authenticité du webhook
-    const verified = verifyWebhook(req);
-    if (!verified) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
+    console.log('Webhook reçu:', req.body); // Pour debug
 
     const product = req.body;
     
-    // Vérifier si c'est un produit Zakeke
     if (isZakekeProduct(product)) {
       await processZakekeProduct(product);
       console.log(`Produit Zakeke traité: ${product.id}`);
@@ -23,28 +17,14 @@ export default async function handler(req, res) {
 
     return res.status(200).json({ 
       status: 'success', 
-      processed: isZakekeProduct(product) 
+      processed: isZakekeProduct(product),
+      productId: product.id
     });
 
   } catch (error) {
     console.error('Erreur webhook:', error);
-    return res.status(500).json({ error: 'Internal server error' });
+    return res.status(500).json({ error: error.message });
   }
-}
-
-// Vérifier l'authenticité du webhook Shopify
-function verifyWebhook(req) {
-  const hmac = req.headers['x-shopify-hmac-sha256'];
-  const body = JSON.stringify(req.body);
-  const hash = crypto
-    .createHmac('sha256', process.env.SHOPIFY_WEBHOOK_SECRET)
-    .update(body, 'utf8')
-    .digest('base64');
-
-  return crypto.timingSafeEqual(
-    Buffer.from(hash, 'base64'),
-    Buffer.from(hmac, 'base64')
-  );
 }
 
 // Vérifier si c'est un produit Zakeke
