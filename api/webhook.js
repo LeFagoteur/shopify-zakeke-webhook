@@ -40,10 +40,9 @@ export default async function handler(req, res) {
 // Vérifier si c'est un produit Zakeke
 function isZakekeProduct(product) {
   return (
-    product.vendor === 'Zakeke' ||
-    product.product_type === 'zakeke-design' ||
-    product.title.includes('Custom') ||
-    (product.tags && product.tags.includes('zakeke'))
+    product.product_type === 'zakeke-design' ||  // ← Principal
+    product.vendor === 'Zakeke' ||              // ← Backup
+    product.title.includes('Custom')             // ← Backup 2
   );
 }
 
