@@ -1,5 +1,6 @@
 const fetch = require('node-fetch');
 module.exports = async function handler(req, res) {
+  res.status(200).send("Webhook désactivé temporairement")
   // DÉSACTIVÉ TEMPORAIREMENT POUR TESTS
   // console.log('⏸️ Webhook Zakeke désactivé pour tests');
   // return res.status(200).send('OK - Désactivé');
