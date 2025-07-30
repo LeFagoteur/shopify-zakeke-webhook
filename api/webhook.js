@@ -1,3 +1,8 @@
+app.post('/webhooks/zakeke', async (req, res) => {
+  // DÉSACTIVÉ TEMPORAIREMENT POUR TESTS
+  console.log('⏸️ Webhook Zakeke désactivé pour tests');
+  return res.status(200).send('OK - Désactivé');
+  
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -301,3 +306,4 @@ async function addProductTag(productId, newTag) {
     throw error;
   }
 }
+});
