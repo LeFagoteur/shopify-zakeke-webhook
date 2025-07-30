@@ -146,4 +146,158 @@ async function getCustomerData(customerId) {
       }
       
       // Priorité 2: Note du client
-      if (customer.note && customer
+      if (customer.note && customer.note.includes('Entreprise:')) {
+        const match = customer.note.match(/Entreprise:\s*([^,\n]+)/);
+        if (match) {
+          const companyName = match[1].trim();
+          const tag = 'pro' + companyName.toLowerCase().replace(/[\s\+\-\&\.\,\:]/g, '');
+          
+          return {
+            found: true,
+            customerId: customer.id,
+            companyName: companyName,
+            tag: tag,
+            source: 'customer_note'
+          };
+        }
+      }
+    }
+    
+    return { found: false, reason: 'Customer not found or no company info' };
+    
+  } catch (error) {
+    console.error('❌ Erreur récupération client:', error);
+    return { found: false, error: error.message };
+  }
+}
+
+// Récupérer le client le plus récemment modifié avec des tags 'pro'
+async function getRecentCustomerWithTags() {
+  try {
+    console.log('🔍 Recherche client récent avec tags...');
+    
+    const response = await fetch(
+      `https://${process.env.SHOPIFY_SHOP_DOMAIN}/admin/api/2024-01/customers.json?limit=10&updated_at_min=${new Date(Date.now() - 600000).toISOString()}`,
+      {
+        headers: {
+          'X-Shopify-Access-Token': process.env.SHOPIFY_ACCESS_TOKEN
+        }
+      }
+    );
+    
+    if (response.ok) {
+      const data = await response.json();
+      console.log('👥 Clients récents trouvés:', data.customers.length);
+      
+      // Chercher un client avec tag 'pro' ou note 'Entreprise:'
+      for (const customer of data.customers) {
+        console.log(`🔍 Analyse client: ${customer.email}`);
+        
+        // Tags existants
+        if (customer.tags && customer.tags.includes('pro')) {
+          const existingTag = customer.tags.split(',').find(tag => tag.trim().startsWith('pro'));
+          if (existingTag) {
+            console.log('✅ Client avec tag trouvé:', existingTag.trim());
+            return {
+              found: true,
+              customerId: customer.id,
+              companyName: existingTag.trim(),
+              tag: existingTag.trim(),
+              source: 'recent_customer_tags'
+            };
+          }
+        }
+        
+        // Notes client
+        if (customer.note && customer.note.includes('Entreprise:')) {
+          const match = customer.note.match(/Entreprise:\s*([^,\n]+)/);
+          if (match) {
+            const companyName = match[1].trim();
+            const tag = 'pro' + companyName.toLowerCase().replace(/[\s\+\-\&\.\,\:]/g, '');
+            
+            console.log('✅ Client avec note trouvé:', companyName);
+            return {
+              found: true,
+              customerId: customer.id,
+              companyName: companyName,
+              tag: tag,
+              source: 'recent_customer_note'
+            };
+          }
+        }
+      }
+    }
+    
+    return { found: false, reason: 'No recent customers with company info' };
+    
+  } catch (error) {
+    console.error('❌ Erreur recherche clients récents:', error);
+    return { found: false, error: error.message };
+  }
+}
+
+// Ajouter tag au produit
+async function addProductTag(productId, newTag) {
+  try {
+    console.log('🏷️ Ajout du tag:', newTag);
+    
+    // Récupérer produit actuel
+    const getResponse = await fetch(
+      `https://${process.env.SHOPIFY_SHOP_DOMAIN}/admin/api/2024-01/products/${productId}.json`,
+      {
+        headers: {
+          'X-Shopify-Access-Token': process.env.SHOPIFY_ACCESS_TOKEN
+        }
+      }
+    );
+
+    if (!getResponse.ok) {
+      throw new Error(`Erreur récupération: ${getResponse.statusText}`);
+    }
+
+    const productData = await getResponse.json();
+    const currentTags = productData.product.tags || '';
+    
+    // Vérifier si le tag existe déjà
+    if (currentTags.includes(newTag)) {
+      console.log('ℹ️ Tag déjà présent:', newTag);
+      return productData;
+    }
+    
+    // Ajouter nouveau tag
+    const updatedTags = currentTags 
+      ? `${currentTags}, ${newTag}`
+      : newTag;
+
+    // Mettre à jour produit
+    const updateResponse = await fetch(
+      `https://${process.env.SHOPIFY_SHOP_DOMAIN}/admin/api/2024-01/products/${productId}.json`,
+      {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Shopify-Access-Token': process.env.SHOPIFY_ACCESS_TOKEN
+        },
+        body: JSON.stringify({
+          product: {
+            id: productId,
+            tags: updatedTags
+          }
+        })
+      }
+    );
+
+    if (!updateResponse.ok) {
+      const errorText = await updateResponse.text();
+      console.error('❌ Erreur ajout tag:', updateResponse.status, errorText);
+      throw new Error(`Erreur ajout tag: ${updateResponse.statusText}`);
+    }
+
+    console.log('✅ Tag ajouté avec succès:', newTag);
+    return await updateResponse.json();
+    
+  } catch (error) {
+    console.error('❌ Erreur addProductTag:', error);
+    throw error;
+  }
+}
