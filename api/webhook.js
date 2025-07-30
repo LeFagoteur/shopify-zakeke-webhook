@@ -1,9 +1,8 @@
-app.post('/webhooks/zakeke', async (req, res) => {
-  // DÉSACTIVÉ TEMPORAIREMENT POUR TESTS
-  console.log('⏸️ Webhook Zakeke désactivé pour tests');
-  return res.status(200).send('OK - Désactivé');
-  
 export default async function handler(req, res) {
+  // DÉSACTIVÉ TEMPORAIREMENT POUR TESTS
+  // console.log('⏸️ Webhook Zakeke désactivé pour tests');
+  // return res.status(200).send('OK - Désactivé');
+  
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
@@ -16,7 +15,33 @@ export default async function handler(req, res) {
     if (isZakekeProduct(product)) {
       console.log('✅ Produit Zakeke détecté !');
       
-      // Méthode 1: Chercher l'ID client dans les métadonnées Zakeke
+      // NOUVELLE MÉTHODE: Chercher d'abord dans la map globale
+      const designId = extractDesignIdFromProduct(product);
+      if (designId && global.designCustomerMap?.[designId]) {
+        const customerData = global.designCustomerMap[designId];
+        console.log('🎯 Association trouvée dans la map:', customerData);
+        
+        // Ajouter le tag
+        await addProductTag(product.id, customerData.customerTag);
+        
+        // Nettoyer la map
+        delete global.designCustomerMap[designId];
+        
+        return res.status(200).json({ 
+          status: 'success', 
+          processed: true,
+          productId: product.id,
+          customerInfo: {
+            found: true,
+            customerId: customerData.customerId,
+            tag: customerData.customerTag,
+            source: 'design_map'
+          },
+          message: 'Tag client ajouté avec succès (via map)'
+        });
+      }
+      
+      // Méthode originale: Chercher l'ID client dans les métadonnées Zakeke
       const customerInfo = await extractCustomerFromZakeke(product);
       
       if (customerInfo.found) {
@@ -55,6 +80,37 @@ export default async function handler(req, res) {
       error: 'Internal server error',
       message: error.message 
     });
+  }
+}
+
+// NOUVELLE FONCTION: Extraire le design ID du produit
+function extractDesignIdFromProduct(product) {
+  try {
+    // Méthode 1: Depuis les métadonnées
+    if (product.metafields) {
+      const designMeta = product.metafields.find(m => 
+        m.namespace === 'zakeke' && m.key === 'design_id'
+      );
+      if (designMeta) return designMeta.value;
+    }
+    
+    // Méthode 2: Depuis le HTML (data-design attribute)
+    if (product.body_html) {
+      const match = product.body_html.match(/data-design="([^"]+)"/);
+      if (match) return match[1];
+    }
+    
+    // Méthode 3: Depuis le titre ou SKU
+    if (product.title && product.title.includes('Design:')) {
+      const match = product.title.match(/Design:\s*([^\s,]+)/);
+      if (match) return match[1];
+    }
+    
+    console.log('⚠️ Design ID non trouvé dans le produit');
+    return null;
+  } catch (error) {
+    console.error('Erreur extraction design ID:', error);
+    return null;
   }
 }
 
@@ -306,4 +362,3 @@ async function addProductTag(productId, newTag) {
     throw error;
   }
 }
-});
