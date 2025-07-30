@@ -1,5 +1,5 @@
 // Ce fichier reçoit TOUTES les données que Shopify envoie
-export default function handler(req, res) {
+module.exports = function handler(req, res) {
   
   // Afficher dans les logs (pour que tu puisses voir)
   console.log('🎯 Quelqu\'un a appelé mon endpoint !');
