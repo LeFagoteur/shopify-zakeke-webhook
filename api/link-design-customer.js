@@ -1,4 +1,4 @@
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   // Autoriser CORS
   res.setHeader('Access-Control-Allow-Credentials', true);
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -24,7 +24,7 @@ export default async function handler(req, res) {
     timestamp: new Date().toISOString()
   });
 
-  // Stocker temporairement (utilisez une DB en production)
+  // Stocker temporairement
   global.designCustomerMap = global.designCustomerMap || {};
   global.designCustomerMap[designId] = {
     customerId,
@@ -38,4 +38,4 @@ export default async function handler(req, res) {
     message: 'Association enregistrée',
     designId
   });
-}
+};
