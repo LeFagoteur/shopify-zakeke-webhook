@@ -2,17 +2,19 @@
   "name": "shopify-zakeke-webhook",
   "version": "1.0.0",
   "description": "Webhook pour automatiser les tags Zakeke",
+  "type": "module",
   "main": "api/webhook.js",
   "scripts": {
     "dev": "vercel dev",
     "deploy": "vercel --prod"
   },
   "dependencies": {
-    "@shopify/shopify-api": "^7.5.0",
-    "crypto": "^1.0.1",
     "node-fetch": "^3.3.2"
   },
   "devDependencies": {
     "vercel": "^32.0.0"
+  },
+  "engines": {
+    "node": "18.x"
   }
 }
