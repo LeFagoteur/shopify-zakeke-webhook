@@ -1,3 +1,4 @@
+const fetch = require('node-fetch');
 module.exports = async function handler(req, res) {
   // DÉSACTIVÉ TEMPORAIREMENT POUR TESTS
   // console.log('⏸️ Webhook Zakeke désactivé pour tests');
