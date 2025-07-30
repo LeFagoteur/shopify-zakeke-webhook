@@ -1,4 +1,4 @@
-module.exports = async function handler(req, res) {
+export default async function handler(req, res) {
   // Autoriser CORS
   res.setHeader('Access-Control-Allow-Credentials', true);
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -38,4 +38,4 @@ module.exports = async function handler(req, res) {
     message: 'Association enregistrée',
     designId
   });
-};
+}
