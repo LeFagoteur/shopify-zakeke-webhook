@@ -229,6 +229,21 @@ function extractDesignIdFromProduct(product) {
 async function extractCustomerFromZakeke(product) {
   try {
     console.log('🔍 Recherche du client dans les métadonnées Zakeke...');
+        // Méthode rapide : lire directement le tag depuis les métadonnées
+    if (product.metafields) {
+      const tagMeta = product.metafields.find(m =>
+        m.namespace === 'zakeke' && m.key === 'customer_tag'
+      );
+      if (tagMeta && tagMeta.value) {
+        console.log('✅ Tag trouvé dans metafield:', tagMeta.value);
+        return {
+          found: true,
+          tag: tagMeta.value,
+          source: 'product_metafield'
+        };
+      }
+    }
+
     
     // Méthode 0: Vérifier les propriétés du produit
     if (product.properties) {
