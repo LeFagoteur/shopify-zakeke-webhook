@@ -1,9 +1,19 @@
 const fetch = require('node-fetch');
 
 module.exports = async function handler(req, res) {
+  // 👉 Gérer CORS
+  res.setHeader('Access-Control-Allow-Origin', 'https://studio.lefagoteur.com');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  // ✅ Si requête OPTIONS (pré-vol), répondre direct
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
+
   // Log complet des données reçues
   console.log('📦 Données complètes reçues:', JSON.stringify(req.body, null, 2));
-  
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
