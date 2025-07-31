@@ -121,6 +121,20 @@ async function extractCustomerFromZakeke(product) {
   try {
     console.log('🔍 Recherche du client dans les métadonnées Zakeke...');
     
+// Méthode 0: Vérifier les attributs du panier
+if (product.properties) {
+  console.log('🛒 Propriétés du produit trouvées:', product.properties);
+  const tagProp = product.properties.find(p => p.name === 'customer_tag');
+  if (tagProp && tagProp.value) {
+    console.log('✅ Tag trouvé dans les propriétés:', tagProp.value);
+    return {
+      found: true,
+      tag: tagProp.value,
+      source: 'product_properties'
+    };
+  }
+}
+    
     // Méthode 1: Depuis les métadonnées du produit
     if (product.metafields) {
       console.log('📊 Métadonnées trouvées:', product.metafields.length);
