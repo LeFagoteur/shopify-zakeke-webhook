@@ -1,29 +1,8 @@
 const fetch = require('node-fetch');
-module.exports = async function handler(req, res) {
-  // Dans webhook.js, ajoutez au début de la fonction handler :
-console.log('📦 Données complètes reçues:', JSON.stringify(req.body, null, 2));
 
-// Et ajoutez cette fonction :
-async function getCartAttributes() {
-  try {
-    // Essayer de récupérer le panier actuel
-    const cartResponse = await fetch(
-      `https://${process.env.SHOPIFY_SHOP_DOMAIN}/admin/api/2024-01/checkouts.json?limit=1`,
-      {
-        headers: {
-          'X-Shopify-Access-Token': process.env.SHOPIFY_ACCESS_TOKEN
-        }
-      }
-    );
-    
-    if (cartResponse.ok) {
-      const data = await cartResponse.json();
-      console.log('🛒 Paniers trouvés:', data);
-    }
-  } catch (error) {
-    console.error('Erreur récupération panier:', error);
-  }
-}
+module.exports = async function handler(req, res) {
+  // Log complet des données reçues
+  console.log('📦 Données complètes reçues:', JSON.stringify(req.body, null, 2));
   
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
@@ -37,16 +16,30 @@ async function getCartAttributes() {
     if (isZakekeProduct(product)) {
       console.log('✅ Produit Zakeke détecté !');
       
-      // NOUVELLE MÉTHODE: Chercher d'abord dans la map globale
+      // NOUVELLE MÉTHODE PRIORITAIRE: Chercher dans les checkouts récents
+      const checkoutTag = await getCustomerTagFromRecentCheckouts();
+      if (checkoutTag.found) {
+        console.log('🎯 Tag trouvé dans checkout:', checkoutTag.tag);
+        
+        // Ajouter le tag au produit
+        await addProductTag(product.id, checkoutTag.tag);
+        
+        return res.status(200).json({ 
+          status: 'success', 
+          processed: true,
+          productId: product.id,
+          customerInfo: checkoutTag,
+          message: 'Tag client ajouté avec succès (via checkout)'
+        });
+      }
+      
+      // MÉTHODE 2: Chercher dans la map globale (si vous utilisez link-design-customer)
       const designId = extractDesignIdFromProduct(product);
       if (designId && global.designCustomerMap?.[designId]) {
         const customerData = global.designCustomerMap[designId];
         console.log('🎯 Association trouvée dans la map:', customerData);
         
-        // Ajouter le tag
         await addProductTag(product.id, customerData.customerTag);
-        
-        // Nettoyer la map
         delete global.designCustomerMap[designId];
         
         return res.status(200).json({ 
@@ -63,14 +56,11 @@ async function getCartAttributes() {
         });
       }
       
-      // Méthode originale: Chercher l'ID client dans les métadonnées Zakeke
+      // MÉTHODE 3: Méthodes originales
       const customerInfo = await extractCustomerFromZakeke(product);
       
       if (customerInfo.found) {
-        console.log('🏢 Client trouvé:', customerInfo.companyName);
         console.log('🏷️ Tag à ajouter:', customerInfo.tag);
-        
-        // Ajouter le tag
         await addProductTag(product.id, customerInfo.tag);
         
         return res.status(200).json({ 
@@ -105,7 +95,96 @@ async function getCartAttributes() {
   }
 }
 
-// NOUVELLE FONCTION: Extraire le design ID du produit
+// NOUVELLE FONCTION: Récupérer le tag depuis les checkouts récents
+async function getCustomerTagFromRecentCheckouts() {
+  try {
+    console.log('🔍 Recherche dans les checkouts récents...');
+    
+    // Essayer d'abord les checkouts abandonnés
+    const checkoutsResponse = await fetch(
+      `https://${process.env.SHOPIFY_SHOP_DOMAIN}/admin/api/2024-01/checkouts.json?limit=10&created_at_min=${new Date(Date.now() - 3600000).toISOString()}`,
+      {
+        headers: {
+          'X-Shopify-Access-Token': process.env.SHOPIFY_ACCESS_TOKEN
+        }
+      }
+    );
+    
+    if (checkoutsResponse.ok) {
+      const data = await checkoutsResponse.json();
+      console.log('🛒 Checkouts trouvés:', data.checkouts?.length || 0);
+      
+      // Chercher le checkout le plus récent avec un customer_tag
+      for (const checkout of (data.checkouts || [])) {
+        console.log('📋 Analyse checkout:', checkout.id);
+        
+        // Vérifier les attributs
+        const attributes = checkout.attributes || checkout.note_attributes || [];
+        console.log('📌 Attributs trouvés:', attributes);
+        
+        const customerTag = attributes.find(attr => 
+          attr.name === 'customer_tag' || attr.key === 'customer_tag'
+        )?.value;
+        
+        if (customerTag) {
+          console.log('✅ Tag trouvé dans checkout:', customerTag);
+          return {
+            found: true,
+            tag: customerTag,
+            source: 'checkout_attributes',
+            checkoutId: checkout.id
+          };
+        }
+      }
+    }
+    
+    // Essayer aussi avec les commandes draft récentes
+    console.log('🔍 Recherche dans les draft orders...');
+    const draftOrdersResponse = await fetch(
+      `https://${process.env.SHOPIFY_SHOP_DOMAIN}/admin/api/2024-01/draft_orders.json?limit=5&status=open`,
+      {
+        headers: {
+          'X-Shopify-Access-Token': process.env.SHOPIFY_ACCESS_TOKEN
+        }
+      }
+    );
+    
+    if (draftOrdersResponse.ok) {
+      const draftData = await draftOrdersResponse.json();
+      console.log('📑 Draft orders trouvés:', draftData.draft_orders?.length || 0);
+      
+      for (const draft of (draftData.draft_orders || [])) {
+        const attributes = draft.note_attributes || [];
+        const customerTag = attributes.find(attr => 
+          attr.name === 'customer_tag'
+        )?.value;
+        
+        if (customerTag) {
+          console.log('✅ Tag trouvé dans draft order:', customerTag);
+          return {
+            found: true,
+            tag: customerTag,
+            source: 'draft_order_attributes'
+          };
+        }
+      }
+    }
+    
+  } catch (error) {
+    console.error('❌ Erreur recherche checkouts:', error);
+  }
+  
+  return { found: false, reason: 'No customer tag in recent checkouts' };
+}
+
+// Fonction pour vérifier si c'est un produit Zakeke
+function isZakekeProduct(product) {
+  return product.product_type === 'zakeke-design' || 
+         product.vendor === 'Zakeke' ||
+         (product.tags && product.tags.includes('zakeke'));
+}
+
+// Extraire le design ID du produit
 function extractDesignIdFromProduct(product) {
   try {
     // Méthode 1: Depuis les métadonnées
@@ -136,28 +215,24 @@ function extractDesignIdFromProduct(product) {
   }
 }
 
-function isZakekeProduct(product) {
-  return product.product_type === 'zakeke-design';
-}
-
-// Extraire le client depuis les données Zakeke
+// Extraire le client depuis les données Zakeke (méthodes de fallback)
 async function extractCustomerFromZakeke(product) {
   try {
     console.log('🔍 Recherche du client dans les métadonnées Zakeke...');
     
-// Méthode 0: Vérifier les attributs du panier
-if (product.properties) {
-  console.log('🛒 Propriétés du produit trouvées:', product.properties);
-  const tagProp = product.properties.find(p => p.name === 'customer_tag');
-  if (tagProp && tagProp.value) {
-    console.log('✅ Tag trouvé dans les propriétés:', tagProp.value);
-    return {
-      found: true,
-      tag: tagProp.value,
-      source: 'product_properties'
-    };
-  }
-}
+    // Méthode 0: Vérifier les propriétés du produit
+    if (product.properties) {
+      console.log('🛒 Propriétés du produit trouvées:', product.properties);
+      const tagProp = product.properties.find(p => p.name === 'customer_tag');
+      if (tagProp && tagProp.value) {
+        console.log('✅ Tag trouvé dans les propriétés:', tagProp.value);
+        return {
+          found: true,
+          tag: tagProp.value,
+          source: 'product_properties'
+        };
+      }
+    }
     
     // Méthode 1: Depuis les métadonnées du produit
     if (product.metafields) {
@@ -175,28 +250,16 @@ if (product.properties) {
     }
     
     // Méthode 2: Depuis le HTML (data attributes Zakeke)
-    if (product.body_html && product.body_html.includes('zakeke-product-tag')) {
+    if (product.body_html) {
       console.log('🔍 Analyse du HTML Zakeke...');
       
-      // Extraire les data attributes Zakeke
       const zaKekeMatches = product.body_html.match(/data-[^=]*="[^"]*"/g);
       if (zaKekeMatches) {
         console.log('📊 Data attributes Zakeke trouvés:', zaKekeMatches);
-        
-        // Chercher un ID de session ou customer
-        for (const match of zaKekeMatches) {
-          if (match.includes('customer') || match.includes('session') || match.includes('user')) {
-            console.log('🎯 Attribut client potentiel:', match);
-            // Extraire la valeur et chercher le client
-            const value = match.match(/"([^"]*)"/)[1];
-            const customerData = await getCustomerData(value);
-            if (customerData.found) return customerData;
-          }
-        }
       }
     }
     
-    // Méthode 3: Chercher le client le plus récemment modifié avec des tags
+    // Méthode 3: Chercher le client le plus récent
     console.log('🔍 Recherche du client le plus récent...');
     return await getRecentCustomerWithTags();
     
@@ -225,42 +288,25 @@ async function getCustomerData(customerId) {
       const customer = customerData.customer;
       
       console.log('✅ Client trouvé:', customer.email);
-      console.log('📝 Note client:', customer.note);
       console.log('🏷️ Tags client:', customer.tags);
       
-      // Priorité 1: Tags existants du client
-      if (customer.tags && customer.tags.includes('pro')) {
-        const existingTag = customer.tags.split(',').find(tag => tag.trim().startsWith('pro'));
-        if (existingTag) {
+      // Chercher un tag qui commence par 'pro'
+      if (customer.tags) {
+        const tags = customer.tags.split(',').map(t => t.trim());
+        const proTag = tags.find(tag => tag.startsWith('pro'));
+        
+        if (proTag) {
           return {
             found: true,
             customerId: customer.id,
-            companyName: existingTag.trim(),
-            tag: existingTag.trim(),
+            tag: proTag,
             source: 'customer_tags'
-          };
-        }
-      }
-      
-      // Priorité 2: Note du client
-      if (customer.note && customer.note.includes('Entreprise:')) {
-        const match = customer.note.match(/Entreprise:\s*([^,\n]+)/);
-        if (match) {
-          const companyName = match[1].trim();
-          const tag = 'pro' + companyName.toLowerCase().replace(/[\s\+\-\&\.\,\:]/g, '');
-          
-          return {
-            found: true,
-            customerId: customer.id,
-            companyName: companyName,
-            tag: tag,
-            source: 'customer_note'
           };
         }
       }
     }
     
-    return { found: false, reason: 'Customer not found or no company info' };
+    return { found: false, reason: 'Customer not found or no pro tag' };
     
   } catch (error) {
     console.error('❌ Erreur récupération client:', error);
@@ -268,7 +314,7 @@ async function getCustomerData(customerId) {
   }
 }
 
-// Récupérer le client le plus récemment modifié avec des tags 'pro'
+// Récupérer le client le plus récent avec des tags 'pro'
 async function getRecentCustomerWithTags() {
   try {
     console.log('🔍 Recherche client récent avec tags...');
@@ -286,46 +332,25 @@ async function getRecentCustomerWithTags() {
       const data = await response.json();
       console.log('👥 Clients récents trouvés:', data.customers.length);
       
-      // Chercher un client avec tag 'pro' ou note 'Entreprise:'
       for (const customer of data.customers) {
-        console.log(`🔍 Analyse client: ${customer.email}`);
-        
-        // Tags existants
         if (customer.tags && customer.tags.includes('pro')) {
-          const existingTag = customer.tags.split(',').find(tag => tag.trim().startsWith('pro'));
-          if (existingTag) {
-            console.log('✅ Client avec tag trouvé:', existingTag.trim());
+          const tags = customer.tags.split(',').map(t => t.trim());
+          const proTag = tags.find(tag => tag.startsWith('pro'));
+          
+          if (proTag) {
+            console.log('✅ Client avec tag trouvé:', proTag);
             return {
               found: true,
               customerId: customer.id,
-              companyName: existingTag.trim(),
-              tag: existingTag.trim(),
+              tag: proTag,
               source: 'recent_customer_tags'
-            };
-          }
-        }
-        
-        // Notes client
-        if (customer.note && customer.note.includes('Entreprise:')) {
-          const match = customer.note.match(/Entreprise:\s*([^,\n]+)/);
-          if (match) {
-            const companyName = match[1].trim();
-            const tag = 'pro' + companyName.toLowerCase().replace(/[\s\+\-\&\.\,\:]/g, '');
-            
-            console.log('✅ Client avec note trouvé:', companyName);
-            return {
-              found: true,
-              customerId: customer.id,
-              companyName: companyName,
-              tag: tag,
-              source: 'recent_customer_note'
             };
           }
         }
       }
     }
     
-    return { found: false, reason: 'No recent customers with company info' };
+    return { found: false, reason: 'No recent customers with pro tag' };
     
   } catch (error) {
     console.error('❌ Erreur recherche clients récents:', error);
@@ -336,7 +361,7 @@ async function getRecentCustomerWithTags() {
 // Ajouter tag au produit
 async function addProductTag(productId, newTag) {
   try {
-    console.log('🏷️ Ajout du tag:', newTag);
+    console.log('🏷️ Ajout du tag au produit ID:', productId, 'Tag:', newTag);
     
     // Récupérer produit actuel
     const getResponse = await fetch(
@@ -349,7 +374,7 @@ async function addProductTag(productId, newTag) {
     );
 
     if (!getResponse.ok) {
-      throw new Error(`Erreur récupération: ${getResponse.statusText}`);
+      throw new Error(`Erreur récupération produit: ${getResponse.statusText}`);
     }
 
     const productData = await getResponse.json();
