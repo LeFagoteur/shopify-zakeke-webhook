@@ -1,5 +1,29 @@
 const fetch = require('node-fetch');
 module.exports = async function handler(req, res) {
+  // Dans webhook.js, ajoutez au début de la fonction handler :
+console.log('📦 Données complètes reçues:', JSON.stringify(req.body, null, 2));
+
+// Et ajoutez cette fonction :
+async function getCartAttributes() {
+  try {
+    // Essayer de récupérer le panier actuel
+    const cartResponse = await fetch(
+      `https://${process.env.SHOPIFY_SHOP_DOMAIN}/admin/api/2024-01/checkouts.json?limit=1`,
+      {
+        headers: {
+          'X-Shopify-Access-Token': process.env.SHOPIFY_ACCESS_TOKEN
+        }
+      }
+    );
+    
+    if (cartResponse.ok) {
+      const data = await cartResponse.json();
+      console.log('🛒 Paniers trouvés:', data);
+    }
+  } catch (error) {
+    console.error('Erreur récupération panier:', error);
+  }
+}
   
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
