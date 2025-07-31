@@ -1,6 +1,8 @@
 const fetch = require('node-fetch');
 
 module.exports = async function handler(req, res) {
+  console.log('🌍 Domaine Shopify chargé :', process.env.SHOPIFY_SHOP_DOMAIN);
+
   // 👉 Gérer CORS
   res.setHeader('Access-Control-Allow-Origin', 'https://studio.lefagoteur.com');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
