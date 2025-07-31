@@ -443,7 +443,9 @@ async function addProductTag(productId, newTag) {
     }
 
     console.log('✅ Tag ajouté avec succès:', newTag);
-    return await updateResponse.json();
+const result = await updateResponse.json();
+console.log('🧾 Réponse Shopify après update:', result);
+return result;
     
   } catch (error) {
     console.error('❌ Erreur addProductTag:', error);
