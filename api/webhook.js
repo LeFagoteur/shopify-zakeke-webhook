@@ -408,10 +408,11 @@ async function addProductTag(productId, newTag) {
     const currentTags = productData.product.tags || '';
     
     // Vérifier si le tag existe déjà
-    if (currentTags.includes(newTag)) {
-      console.log('ℹ️ Tag déjà présent:', newTag);
-      return productData;
-    }
+    // if (currentTags.includes(newTag)) {
+//   console.log('ℹ️ Tag déjà présent:', newTag);
+//   return productData;
+// }
+
     
     // Ajouter nouveau tag
     const updatedTags = currentTags 
