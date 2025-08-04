@@ -419,7 +419,21 @@ async function addProductTag(productId, newTag) {
       ? `${currentTags}, ${newTag}`
       : newTag;
 
-    // Mettre à jour produit
+    // 🆕 Ajout d'un titre personnalisé basé sur le tag client
+    const clientTag = newTag;
+    const baseTitle = productData.product.title || 'Zakeke Produit';
+
+    const cleanedName = clientTag
+      .replace(/^pro/, '')
+      .replace(/-/g, ' ')
+      .trim()
+      .split(' ')
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ');
+
+    const updatedTitle = `${cleanedName} - ${baseTitle}`;
+
+    // Mettre à jour produit avec tags + titre
     const updateResponse = await fetch(
       `https://${process.env.SHOPIFY_SHOP_DOMAIN}/admin/api/2024-01/products/${productId}.json`,
       {
@@ -431,7 +445,8 @@ async function addProductTag(productId, newTag) {
         body: JSON.stringify({
           product: {
             id: productId,
-            tags: updatedTags
+            tags: updatedTags,
+            title: updatedTitle
           }
         })
       }
@@ -444,10 +459,10 @@ async function addProductTag(productId, newTag) {
     }
 
     console.log('✅ Tag ajouté avec succès:', newTag);
-const result = await updateResponse.json();
-console.log('🧾 Réponse Shopify après update:', result);
-return result;
-    
+    const result = await updateResponse.json();
+    console.log('🧾 Réponse Shopify après update:', result);
+    return result;
+
   } catch (error) {
     console.error('❌ Erreur addProductTag:', error);
     throw error;
