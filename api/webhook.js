@@ -419,9 +419,10 @@ async function addProductTag(productId, newTag) {
       ? `${currentTags}, ${newTag}`
       : newTag;
 
-    // 🆕 Ajout d'un titre personnalisé basé sur le tag client
+
+        // Vérifier si le titre a déjà été modifié pour éviter les doublons
+    const originalTitle = productData.product.title || 'Zakeke Produit';
     const clientTag = newTag;
-    const baseTitle = productData.product.title || 'Zakeke Produit';
 
     const cleanedName = clientTag
       .replace(/^pro/, '')
@@ -431,7 +432,9 @@ async function addProductTag(productId, newTag) {
       .map(word => word.charAt(0).toUpperCase() + word.slice(1))
       .join(' ');
 
-    const updatedTitle = `${cleanedName} - ${baseTitle}`;
+    const expectedPrefix = `${cleanedName} - `;
+    const titleAlreadyCustomized = originalTitle.startsWith(expectedPrefix);
+    const updatedTitle = titleAlreadyCustomized ? originalTitle : `${expectedPrefix}${originalTitle}`;
 
     // Mettre à jour produit avec tags + titre
     const updateResponse = await fetch(
