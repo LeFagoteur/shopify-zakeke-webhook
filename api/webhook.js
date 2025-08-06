@@ -317,20 +317,24 @@ async function getCustomerData(customerId) {
       console.log('✅ Client trouvé:', customer.email);
       console.log('🏷️ Tags client:', customer.tags);
       
-      // Chercher un tag qui commence par 'pro'
-      if (customer.tags) {
-        const tags = customer.tags.split(',').map(t => t.trim());
-        const proTag = tags.find(tag => tag.startsWith('pro'));
-        
-        if (proTag) {
-          return {
-            found: true,
-            customerId: customer.id,
-            tag: proTag,
-            source: 'customer_tags'
-          };
-        }
-      }
+     if (customer.tags) {
+  const tags = customer.tags.split(',').map(t => t.trim());
+
+  const BLACKLISTED_TAGS = ['membre-pro', 'membre-premium', 'membre-gratuit'];
+
+  const proTag = tags.find(tag => 
+    tag.startsWith('pro') && !BLACKLISTED_TAGS.includes(tag)
+  );
+
+  if (proTag) {
+    return {
+      found: true,
+      customerId: customer.id,
+      tag: proTag,
+      source: 'customer_tags'
+    };
+  }
+}
     }
     
     return { found: false, reason: 'Customer not found or no pro tag' };
