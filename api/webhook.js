@@ -130,6 +130,7 @@ async function getCustomerTagFromRecentCheckouts() {
   }
 
   return { found: false, reason: 'No customer tag in recent checkouts' };
+}
 
 async function extractCustomerFromZakeke(product) {
   try {
