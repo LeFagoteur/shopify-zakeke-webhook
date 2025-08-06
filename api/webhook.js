@@ -2,6 +2,17 @@ const fetch = require('node-fetch');
 
 const BLACKLISTED_TAGS = ['membre-pro', 'membre-premium', 'membre-gratuit'];
 
+function extractValidProTag(rawTagString) {
+  if (!rawTagString) return null;
+
+  const allTags = rawTagString
+    .split(/[\s,]+/)
+    .map(tag => tag.trim())
+    .filter(tag => tag.length > 0 && !BLACKLISTED_TAGS.includes(tag));
+
+  return allTags.find(tag => tag.startsWith('pro')) || null;
+}
+
 module.exports = async function handler(req, res) {
   console.log('🌍 Domaine Shopify chargé :', process.env.SHOPIFY_SHOP_DOMAIN);
 
@@ -90,9 +101,10 @@ async function getCustomerTagFromRecentCheckouts() {
       const data = await checkoutsResponse.json();
       for (const checkout of data.checkouts || []) {
         const attributes = checkout.attributes || checkout.note_attributes || [];
-        const customerTag = attributes.find(attr => attr.name === 'customer_tag' || attr.key === 'customer_tag')?.value;
-        if (customerTag && !BLACKLISTED_TAGS.includes(customerTag)) {
-          return { found: true, tag: customerTag, source: 'checkout_attributes', checkoutId: checkout.id };
+        const rawTagString = attributes.find(attr => attr.name === 'customer_tag' || attr.key === 'customer_tag')?.value;
+        const validTag = extractValidProTag(rawTagString);
+        if (validTag) {
+          return { found: true, tag: validTag, source: 'checkout_attributes', checkoutId: checkout.id };
         }
       }
     }
@@ -105,9 +117,10 @@ async function getCustomerTagFromRecentCheckouts() {
       const draftData = await draftOrdersResponse.json();
       for (const draft of draftData.draft_orders || []) {
         const attributes = draft.note_attributes || [];
-        const customerTag = attributes.find(attr => attr.name === 'customer_tag')?.value;
-        if (customerTag && !BLACKLISTED_TAGS.includes(customerTag)) {
-          return { found: true, tag: customerTag, source: 'draft_order_attributes' };
+        const rawTagString = attributes.find(attr => attr.name === 'customer_tag')?.value;
+        const validTag = extractValidProTag(rawTagString);
+        if (validTag) {
+          return { found: true, tag: validTag, source: 'draft_order_attributes' };
         }
       }
     }
@@ -116,7 +129,6 @@ async function getCustomerTagFromRecentCheckouts() {
   }
 
   return { found: false, reason: 'No customer tag in recent checkouts' };
-}
 
 async function extractCustomerFromZakeke(product) {
   try {
