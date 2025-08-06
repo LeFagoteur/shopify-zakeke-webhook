@@ -366,7 +366,7 @@ async function getRecentCustomerWithTags() {
       for (const customer of data.customers) {
         if (customer.tags && customer.tags.includes('pro')) {
           const tags = customer.tags.split(',').map(t => t.trim());
-          const proTag = tags.find(tag => tag.startsWith('pro'));
+          const proTag = tags.find(tag => tag.startsWith('pro') && !BLACKLISTED_TAGS.includes(tag));
           
           if (proTag) {
             console.log('✅ Client avec tag trouvé:', proTag);
