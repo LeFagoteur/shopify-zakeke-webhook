@@ -2,6 +2,7 @@ const fetch = require('node-fetch');
 
 const BLACKLISTED_TAGS = ['membre-pro', 'membre-premium', 'membre-gratuit'];
 
+// Dans votre webhook, cette fonction devrait maintenant recevoir "probass-premium-2"
 function extractValidProTag(rawTagString) {
   if (!rawTagString) return null;
 
