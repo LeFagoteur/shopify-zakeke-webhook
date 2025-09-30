@@ -1,13 +1,12 @@
-// api/link-design-customer.js
-// Lier un design Zakeke à la session client Pro qui l'a créé
-// CommonJS • Vercel • sans dépendances externes
+// api/track-customer.js
+// Tracking de l'activité client Pro (CommonJS • Vercel • sans deps externes)
 
 // ------------------------
 // Config CORS (restreint)
 // ------------------------
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN_REGEX
   ? new RegExp(process.env.ALLOWED_ORIGIN_REGEX)
-  : /^https:\/\/([a-z0-9-]+\.)*lefagoteur\.com$/i; // ex: www.lefagoteur.com, shop.lefagoteur.com
+  : /^https:\/\/([a-z0-9-]+\.)*lefagoteur\.com$/i; // ex: www.lefagoteur.com
 
 function setCors(req, res) {
   const origin = req.headers.origin || '';
@@ -23,17 +22,16 @@ function setCors(req, res) {
 // ------------------------
 // Stockage en mémoire
 // ------------------------
-// designId -> { customerId, customerEmail, customerTag, createdAt }
-if (!global.designCustomerMap) {
-  global.designCustomerMap = new Map();
+if (!global.activeProSessions) {
+  global.activeProSessions = new Map(); // customerId -> sessionData
 }
-// Nettoyage périodique simple (éviter l’amnésie crasse)
-const TTL_MS = 30 * 60 * 1000; // 30 minutes
-function gcDesignMap() {
+const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+
+function gcSessions() {
   const now = Date.now();
-  for (const [designId, rec] of global.designCustomerMap.entries()) {
-    if (now - rec.createdAt > TTL_MS) {
-      global.designCustomerMap.delete(designId);
+  for (const [id, session] of global.activeProSessions.entries()) {
+    if (now - session.lastActivity > SESSION_TIMEOUT_MS) {
+      global.activeProSessions.delete(id);
     }
   }
 }
@@ -43,20 +41,40 @@ function gcDesignMap() {
 // ------------------------
 const BLACKLISTED_TAGS = ['membre-pro', 'membre-premium', 'membre-gratuit'];
 
-function isValidProTag(tag) {
-  if (!tag) return false;
-  const t = String(tag).trim();
-  return t.startsWith('pro') && !BLACKLISTED_TAGS.includes(t) && t.length > 3;
-}
-
 function normalizeBody(body) {
   if (!body) return {};
   if (typeof body === 'string') {
-    try { return JSON.parse(body); } catch {
-      return {};
-    }
+    try { return JSON.parse(body); } catch { return {}; }
   }
   return body;
+}
+
+function toArrayTags(tags) {
+  if (!tags) return [];
+  if (Array.isArray(tags)) return tags.map(t => String(t).trim()).filter(Boolean);
+  return String(tags)
+    .split(',')
+    .map(t => t.trim())
+    .filter(Boolean);
+}
+
+function extractValidProTag(tags) {
+  const tagArray = toArrayTags(tags);
+  const pro = tagArray.find(tag =>
+    tag &&
+    tag.toLowerCase().startsWith('pro') &&
+    !BLACKLISTED_TAGS.includes(tag) &&
+    tag.length > 3
+  );
+  return pro || null;
+}
+
+// "proMaSuperBoite" → "MaSuperBoite" (tu utilises ça pour info/renommage côté produit)
+function extractCompanyName(tag) {
+  if (!tag) return '';
+  const t = String(tag);
+  if (!t.toLowerCase().startsWith('pro')) return '';
+  return t.slice(3);
 }
 
 // ------------------------
@@ -73,78 +91,74 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    // Petit endpoint GET facultatif pour debug: /api/link-design-customer?designId=xxx
+    // GET (debug facultatif): /api/track-customer?customerId=xxx
     if (req.method === 'GET') {
-      const designId = (req.query && req.query.designId) || '';
-      if (!designId) return res.status(400).json({ error: 'Missing designId' });
-      const rec = global.designCustomerMap.get(designId);
+      const id = (req.query && req.query.customerId) || '';
+      if (!id) {
+        return res.status(200).json({
+          sessions: global.activeProSessions.size,
+          timeoutMs: SESSION_TIMEOUT_MS
+        });
+      }
+      const session = global.activeProSessions.get(id) || null;
       return res.status(200).json({
-        exists: !!rec,
-        record: rec || null,
-        ttlMs: TTL_MS
+        exists: !!session,
+        session,
+        timeoutMs: SESSION_TIMEOUT_MS
       });
     }
 
     // POST
-    const payload = normalizeBody(req.body);
+    const { customerId, customerEmail, customerTags, action = 'activity' } = normalizeBody(req.body);
 
-    const {
-      designId,
-      customerId,
-      customerEmail,
-      customerTag,
-      productId,      // optionnel: pratique pour tes logs
-      timestamp       // optionnel: côté front
-    } = payload || {};
-
-    // Validation d’entrée minimale
-    if (!designId || typeof designId !== 'string' || designId.trim().length < 3) {
-      return res.status(400).json({ error: 'Invalid designId' });
-    }
     if (!customerId || !customerEmail) {
       return res.status(400).json({ error: 'Missing customerId or customerEmail' });
     }
-    if (!isValidProTag(customerTag)) {
-      // On ne stocke pas si pas Pro valide
+
+    const validTag = extractValidProTag(customerTags);
+    if (!validTag) {
+      // On répond 200 pour ne pas spammer les erreurs front, mais on indique l’état
       return res.status(200).json({
         success: false,
         reason: 'not-pro',
-        message: 'Customer is not Pro or tag is invalid'
+        message: 'Not a valid Pro customer',
       });
     }
 
-    // Évite les doublons inutiles: si existant, on écrase proprement
-    global.designCustomerMap.set(designId, {
-      customerId,
-      customerEmail,
-      customerTag,
-      productId: productId || null,
-      createdAt: Date.now(),
-      from: 'link-design-customer',
-      sourceTs: timestamp || null
-    });
+    const companyName = extractCompanyName(validTag);
 
-    // Petit coup de balai opportuniste
-    gcDesignMap();
-
-    // Logs sobres (RGPD-friendly)
-    console.log('[link-design-customer] linked', {
-      designId,
+    const sessionData = {
       customerId,
-      tag: customerTag,
-      productId: productId || undefined
+      customerEmail,           // À éviter dans les logs bruts
+      customerTag: validTag,
+      companyName,
+      lastActivity: Date.now(),
+      lastAction: action,
+      sessionId: `${customerId}_${Date.now()}`
+    };
+
+    global.activeProSessions.set(customerId, sessionData);
+    gcSessions();
+
+    // Logs sobres (RGPD friendly): on masque l’email
+    const masked = String(customerEmail).replace(/(^.).*(@.*$)/, '$1***$2');
+    console.log('[track-customer] updated', {
+      customerId,
+      email: masked,
+      tag: validTag,
+      action
     });
 
     return res.status(200).json({
       success: true,
-      designId,
-      customerId,
-      customerTag,
-      ttlMs: TTL_MS
+      sessionId: sessionData.sessionId,
+      customerTag: validTag,
+      companyName,
+      expiresInMs: SESSION_TIMEOUT_MS
     });
 
   } catch (err) {
-    console.error('[link-design-customer] error', err);
+    console.error('[track-customer] error', err);
     return res.status(500).json({ error: 'Internal server error', message: err.message });
   }
 };
