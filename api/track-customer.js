@@ -1,119 +1,150 @@
-// api/track-customer.js
-// Tracking de l'activité client Pro - Version CommonJS
+// api/link-design-customer.js
+// Lier un design Zakeke à la session client Pro qui l'a créé
+// CommonJS • Vercel • sans dépendances externes
 
+// ------------------------
+// Config CORS (restreint)
+// ------------------------
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN_REGEX
+  ? new RegExp(process.env.ALLOWED_ORIGIN_REGEX)
+  : /^https:\/\/([a-z0-9-]+\.)*lefagoteur\.com$/i; // ex: www.lefagoteur.com, shop.lefagoteur.com
+
+function setCors(req, res) {
+  const origin = req.headers.origin || '';
+  if (ALLOWED_ORIGIN.test(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With');
+}
+
+// ------------------------
+// Stockage en mémoire
+// ------------------------
+// designId -> { customerId, customerEmail, customerTag, createdAt }
+if (!global.designCustomerMap) {
+  global.designCustomerMap = new Map();
+}
+// Nettoyage périodique simple (éviter l’amnésie crasse)
+const TTL_MS = 30 * 60 * 1000; // 30 minutes
+function gcDesignMap() {
+  const now = Date.now();
+  for (const [designId, rec] of global.designCustomerMap.entries()) {
+    if (now - rec.createdAt > TTL_MS) {
+      global.designCustomerMap.delete(designId);
+    }
+  }
+}
+
+// ------------------------
+// Utils
+// ------------------------
 const BLACKLISTED_TAGS = ['membre-pro', 'membre-premium', 'membre-gratuit'];
 
-function extractValidProTag(tags) {
-  if (!tags) return null;
-  
-  // Convertir en array si c'est une string
-  const tagArray = Array.isArray(tags) ? tags : tags.split(',').map(t => t.trim());
-  
-  // Trouver un tag pro valide
-  const proTag = tagArray.find(tag => 
-    tag.startsWith('pro') && 
-    !BLACKLISTED_TAGS.includes(tag) &&
-    tag.length > 3
-  );
-  
-  return proTag || null;
+function isValidProTag(tag) {
+  if (!tag) return false;
+  const t = String(tag).trim();
+  return t.startsWith('pro') && !BLACKLISTED_TAGS.includes(t) && t.length > 3;
 }
 
-function extractCompanyName(tag) {
-  if (!tag || !tag.startsWith('pro')) return '';
-  return tag.substring(3);
+function normalizeBody(body) {
+  if (!body) return {};
+  if (typeof body === 'string') {
+    try { return JSON.parse(body); } catch {
+      return {};
+    }
+  }
+  return body;
 }
 
+// ------------------------
+// Handler
+// ------------------------
 module.exports = async function handler(req, res) {
-  // Headers CORS
-  res.setHeader('Access-Control-Allow-Credentials', true);
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
-  res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
+  setCors(req, res);
 
   if (req.method === 'OPTIONS') {
     return res.status(200).end();
   }
-
-  if (req.method !== 'POST') {
+  if (req.method !== 'POST' && req.method !== 'GET') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
   try {
-    const { 
-      customerId, 
-      customerEmail, 
-      customerTags, 
-      action = 'activity'
-    } = req.body;
-    
-    console.log('👤 Tracking activité client:', {
-      email: customerEmail,
-      action,
-      timestamp: new Date().toISOString()
-    });
-    
-    // Valider le tag Pro
-    const validTag = extractValidProTag(customerTags);
-    
-    if (!validTag) {
-      console.log('⚠️ Pas un client Pro valide:', customerTags);
-      return res.status(200).json({ 
-        success: false, 
-        message: 'Not a valid Pro customer' 
+    // Petit endpoint GET facultatif pour debug: /api/link-design-customer?designId=xxx
+    if (req.method === 'GET') {
+      const designId = (req.query && req.query.designId) || '';
+      if (!designId) return res.status(400).json({ error: 'Missing designId' });
+      const rec = global.designCustomerMap.get(designId);
+      return res.status(200).json({
+        exists: !!rec,
+        record: rec || null,
+        ttlMs: TTL_MS
       });
     }
-    
-    const companyName = extractCompanyName(validTag);
-    
-    // Initialiser le stockage global si nécessaire
-    if (!global.activeProSessions) {
-      global.activeProSessions = new Map();
-    }
-    
-    // Créer/Mettre à jour la session
-    const sessionData = {
+
+    // POST
+    const payload = normalizeBody(req.body);
+
+    const {
+      designId,
       customerId,
       customerEmail,
-      customerTag: validTag,
-      companyName,
-      lastActivity: Date.now(),
-      action,
-      sessionId: `${customerId}_${Date.now()}`
-    };
-    
-    global.activeProSessions.set(customerId, sessionData);
-    
-    console.log('✅ Session Pro enregistrée:', {
-      email: customerEmail,
-      company: companyName,
-      tag: validTag,
-      totalSessions: global.activeProSessions.size
-    });
-    
-    // Nettoyer les vieilles sessions (plus de 30 minutes)
-    const SESSION_TIMEOUT = 30 * 60 * 1000;
-    const now = Date.now();
-    
-    for (const [id, session] of global.activeProSessions.entries()) {
-      if (now - session.lastActivity > SESSION_TIMEOUT) {
-        console.log('🧹 Nettoyage session expirée:', session.customerEmail);
-        global.activeProSessions.delete(id);
-      }
+      customerTag,
+      productId,      // optionnel: pratique pour tes logs
+      timestamp       // optionnel: côté front
+    } = payload || {};
+
+    // Validation d’entrée minimale
+    if (!designId || typeof designId !== 'string' || designId.trim().length < 3) {
+      return res.status(400).json({ error: 'Invalid designId' });
     }
-    
-    return res.status(200).json({ 
+    if (!customerId || !customerEmail) {
+      return res.status(400).json({ error: 'Missing customerId or customerEmail' });
+    }
+    if (!isValidProTag(customerTag)) {
+      // On ne stocke pas si pas Pro valide
+      return res.status(200).json({
+        success: false,
+        reason: 'not-pro',
+        message: 'Customer is not Pro or tag is invalid'
+      });
+    }
+
+    // Évite les doublons inutiles: si existant, on écrase proprement
+    global.designCustomerMap.set(designId, {
+      customerId,
+      customerEmail,
+      customerTag,
+      productId: productId || null,
+      createdAt: Date.now(),
+      from: 'link-design-customer',
+      sourceTs: timestamp || null
+    });
+
+    // Petit coup de balai opportuniste
+    gcDesignMap();
+
+    // Logs sobres (RGPD-friendly)
+    console.log('[link-design-customer] linked', {
+      designId,
+      customerId,
+      tag: customerTag,
+      productId: productId || undefined
+    });
+
+    return res.status(200).json({
       success: true,
-      sessionId: sessionData.sessionId,
-      customerTag: validTag,
-      companyName
+      designId,
+      customerId,
+      customerTag,
+      ttlMs: TTL_MS
     });
-    
-  } catch (error) {
-    console.error('❌ Erreur tracking client:', error);
-    return res.status(500).json({ 
-      error: 'Internal server error',
-      message: error.message 
-    });
+
+  } catch (err) {
+    console.error('[link-design-customer] error', err);
+    return res.status(500).json({ error: 'Internal server error', message: err.message });
   }
 };
