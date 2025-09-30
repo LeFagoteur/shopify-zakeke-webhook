@@ -8,7 +8,8 @@ const SHOPIFY_SHOP_DOMAIN   = process.env.SHOPIFY_SHOP_DOMAIN;
 const SHOPIFY_WEBHOOK_SECRET= process.env.SHOPIFY_WEBHOOK_SECRET;
 const SHOPIFY_API_VERSION   = process.env.SHOPIFY_API_VERSION || '2025-01';
 
-exports.config = { api: { bodyParser: false } };
+module.exports = async function handler(req,res){...}
+module.exports.config = { api: { bodyParser: false } };
 
 // Lire le raw body (obligatoire pour HMAC)
 async function readRawBody(req) {
