@@ -1,5 +1,4 @@
-// api/link-design-customer.js
-// Lier un design Zakeke et/ou un productId au client Pro (CommonJS)
+// /api/link-design-customer.js
 
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN_REGEX
   ? new RegExp(process.env.ALLOWED_ORIGIN_REGEX)
@@ -16,22 +15,30 @@ function setCors(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With');
 }
 
-if (!global.designCustomerMap) global.designCustomerMap = new Map();   // designId -> attribution
-if (!global.productCustomerMap) global.productCustomerMap = new Map(); // productId -> attribution
+// Initialisation des Maps globales
+if (!global.designCustomerMap) global.designCustomerMap = new Map();
+if (!global.productCustomerMap) global.productCustomerMap = new Map();
+if (!global.sessionCustomerMap) global.sessionCustomerMap = new Map(); // ✅ NOUVEAU
 
-const TTL_MS = 60 * 60 * 1000; // 60 min pour maximiser les chances sans DB
+const TTL_MS = 60 * 60 * 1000; // 60 min
 
 function gcMaps() {
   const now = Date.now();
+  
   for (const [k, v] of global.designCustomerMap.entries()) {
     if (now - v.createdAt > TTL_MS) global.designCustomerMap.delete(k);
   }
   for (const [k, v] of global.productCustomerMap.entries()) {
     if (now - v.createdAt > TTL_MS) global.productCustomerMap.delete(k);
   }
+  // ✅ NOUVEAU : Nettoyer aussi sessionCustomerMap
+  for (const [k, v] of global.sessionCustomerMap.entries()) {
+    if (now - v.createdAt > TTL_MS) global.sessionCustomerMap.delete(k);
+  }
 }
 
 const BLACKLISTED_TAGS = ['membre-pro', 'membre-premium', 'membre-gratuit'];
+
 function isValidProTag(tag) {
   if (!tag) return false;
   const t = String(tag).trim();
@@ -55,27 +62,32 @@ module.exports = async function handler(req, res) {
   }
 
   try {
-    // GET de debug: ?designId=... ou ?productId=...
+    // GET de debug
     if (req.method === 'GET') {
       const designId = (req.query && req.query.designId) || null;
       const productId = (req.query && req.query.productId) || null;
+      const sessionId = (req.query && req.query.sessionId) || null; // ✅ NOUVEAU
 
       const byDesign = designId ? global.designCustomerMap.get(designId) || null : null;
       const byProduct = productId ? global.productCustomerMap.get(String(productId)) || null : null;
+      const bySession = sessionId ? global.sessionCustomerMap.get(sessionId) || null : null; // ✅ NOUVEAU
 
       return res.status(200).json({
         designId,
         productId,
+        sessionId, // ✅ NOUVEAU
         byDesignExists: !!byDesign,
         byProductExists: !!byProduct,
+        bySessionExists: !!bySession, // ✅ NOUVEAU
         byDesign,
         byProduct,
+        bySession, // ✅ NOUVEAU
         ttlMs: TTL_MS
       });
     }
 
     // POST
-    const { designId, customerId, customerEmail, customerTag, productId, timestamp } = normalizeBody(req.body);
+    const { designId, customerId, customerEmail, customerTag, productId, timestamp, sessionId } = normalizeBody(req.body); // ✅ AJOUT sessionId
 
     if (!designId && !productId) {
       return res.status(400).json({ error: 'Missing designId or productId' });
@@ -92,19 +104,50 @@ module.exports = async function handler(req, res) {
       customerEmail,
       customerTag,
       productId: productId || null,
+      sessionId: sessionId || null, // ✅ NOUVEAU
       createdAt: Date.now(),
       from: 'link-design-customer',
       sourceTs: timestamp || null
     };
 
-    if (designId) global.designCustomerMap.set(designId, attrib);
-    if (productId) global.productCustomerMap.set(String(productId), attrib);
+    // Stocker par designId
+    if (designId) {
+      global.designCustomerMap.set(designId, attrib);
+    }
+    
+    // Stocker par productId
+    if (productId) {
+      global.productCustomerMap.set(String(productId), attrib);
+    }
+
+    // ✅ NOUVEAU : Stocker AUSSI par sessionId (pour fallback)
+    if (sessionId) {
+      // Vérifier si on a déjà des designs pour cette session
+      const existingSession = global.sessionCustomerMap.get(sessionId);
+      
+      if (existingSession) {
+        // Ajouter le designId à la liste
+        if (designId && !existingSession.designIds.includes(designId)) {
+          existingSession.designIds.push(designId);
+        }
+      } else {
+        // Créer nouvelle entrée session
+        global.sessionCustomerMap.set(sessionId, {
+          customerId,
+          customerEmail,
+          customerTag,
+          designIds: designId ? [designId] : [],
+          createdAt: Date.now()
+        });
+      }
+    }
 
     gcMaps();
 
     console.log('[link-design-customer] linked', {
       designId: designId || null,
       productId: productId || null,
+      sessionId: sessionId || null, // ✅ NOUVEAU
       customerId,
       tag: customerTag
     });
@@ -113,6 +156,7 @@ module.exports = async function handler(req, res) {
       success: true,
       designId: designId || null,
       productId: productId || null,
+      sessionId: sessionId || null, // ✅ NOUVEAU
       customerId,
       customerTag,
       ttlMs: TTL_MS
