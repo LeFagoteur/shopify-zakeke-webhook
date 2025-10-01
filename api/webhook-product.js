@@ -1,5 +1,5 @@
-// api/webhook-product.js  (CommonJS, Node, Vercel)
-// Version corrigée pour utiliser designCustomerMap au lieu de productCustomerMap
+// api/webhook-product.js
+// Vérifie HMAC, traite products/create & products/update, tag + rename avec recherche multi-niveaux
 
 const crypto = require('crypto');
 
@@ -14,7 +14,7 @@ exports.config = {
   } 
 };
 
-// ------------ low-level utils ------------
+// ------------ Low-level utils ------------
 async function readRawBody(req) {
   const chunks = [];
   for await (const c of req) chunks.push(c);
@@ -45,17 +45,10 @@ async function shopifyGraphQL(query, variables = {}) {
   return data.data;
 }
 
-// ------------ business utils ------------
+// ------------ Business utils ------------
 function isZakekeProduct(p) {
   const pt = (p && p.product_type) || '';
-  const vendor = (p && p.vendor) || '';
-  const title = (p && p.title) || '';
-  
-  // Plus de critères pour détecter Zakeke
-  return /zakeke/i.test(pt) || 
-         /zakeke/i.test(vendor) || 
-         /custom/i.test(title) ||
-         /mug/i.test(title); // Vos produits sont des mugs
+  return /zakeke/i.test(pt);
 }
 
 function companyFromProTag(tag) {
@@ -64,115 +57,118 @@ function companyFromProTag(tag) {
   return raw.replace(/[-_]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').trim();
 }
 
-// Extraire designId du HTML ou d'autres sources
-function extractDesignId(webhookData) {
-  // Du body HTML
-  if (webhookData.body_html) {
-    const patterns = [
-      /data-design="([^"]+)"/,
-      /designDocID=([^&\s"]+)/,
-      /design[_-]?id["\s:=]+([a-zA-Z0-9-]+)/i
-    ];
-    
-    for (const pattern of patterns) {
-      const match = webhookData.body_html.match(pattern);
-      if (match && match[1]) {
-        console.log('[webhook-product] DesignId trouvé dans HTML:', match[1]);
-        return match[1];
-      }
-    }
+/**
+ * Extrait le designId depuis le body_html du produit
+ * Format Zakeke: <div data-zakeke-design-id="000-xxxxx">
+ */
+function extractDesignIdFromHtml(bodyHtml) {
+  if (!bodyHtml) return null;
+  
+  // Chercher data-zakeke-design-id
+  const match = bodyHtml.match(/data-zakeke-design-id=["']([^"']+)["']/i);
+  if (match && match[1]) {
+    return match[1];
   }
   
-  // Du SKU des variants
-  if (webhookData.variants && webhookData.variants[0]) {
-    const sku = webhookData.variants[0].sku;
-    if (sku && sku.includes('design-')) {
-      console.log('[webhook-product] DesignId trouvé dans SKU:', sku);
-      return sku;
-    }
+  // Fallback: chercher un pattern 000-xxxxx dans le HTML
+  const fallbackMatch = bodyHtml.match(/000-[A-Za-z0-9]{20,}/);
+  if (fallbackMatch) {
+    return fallbackMatch[0];
   }
   
   return null;
 }
 
-// CORRIGÉ : Chercher dans les bonnes sources
-function findAttributionForProduct(productId, designId) {
-  console.log('[webhook-product] Recherche attribution pour:', {
-    productId: productId,
-    designId: designId || 'non trouvé'
-  });
+/**
+ * Recherche d'attribution avec 3 niveaux de fallback
+ * Retourne { customerTag, source } ou null
+ */
+function findAttribution(productId, designId) {
+  console.log('[webhook-product] 🔍 Recherche attribution:', { productId, designId });
   
-  // Log de l'état du système
-  console.log('[webhook-product] État système:', {
-    designCustomerMap: global.designCustomerMap ? 
-      (global.designCustomerMap.size || Object.keys(global.designCustomerMap).length || 0) : 0,
-    activeProSessions: global.activeProSessions ? global.activeProSessions.size : 0,
-    productCustomerMap: global.productCustomerMap ? global.productCustomerMap.size : 0
-  });
-  
-  // 1) Chercher par designId dans designCustomerMap
-  if (designId && global.designCustomerMap) {
-    // Si c'est une Map
-    if (global.designCustomerMap.has && typeof global.designCustomerMap.has === 'function') {
-      if (global.designCustomerMap.has(designId)) {
-        const attr = global.designCustomerMap.get(designId);
-        console.log('[webhook-product] ✅ Trouvé via designCustomerMap (Map):', attr.customerTag);
-        return attr;
+  // NIVEAU 1: Recherche par productId (le plus direct)
+  if (productId && global.productCustomerMap?.has(String(productId))) {
+    const attr = global.productCustomerMap.get(String(productId));
+    console.log('[webhook-product] ✅ Trouvé via productCustomerMap');
+    return { 
+      customerTag: attr.customerTag, 
+      customerId: attr.customerId,
+      source: 'productCustomerMap' 
+    };
+  }
+
+  // NIVEAU 2: Recherche par designId
+  if (designId && global.designCustomerMap?.has(designId)) {
+    const attr = global.designCustomerMap.get(designId);
+    console.log('[webhook-product] ✅ Trouvé via designCustomerMap');
+    return { 
+      customerTag: attr.customerTag,
+      customerId: attr.customerId,
+      source: 'designCustomerMap' 
+    };
+  }
+
+  // NIVEAU 3: Recherche par sessionId via recentDesignActivity
+  if (designId && global.recentDesignActivity) {
+    const recentActivity = Array.from(global.recentDesignActivity.values())
+      .filter(a => a.designId === designId)
+      .sort((a, b) => b.timestamp - a.timestamp)[0];
+    
+    if (recentActivity?.sessionId && global.sessionCustomerMap) {
+      const sessionData = global.sessionCustomerMap.get(recentActivity.sessionId);
+      if (sessionData?.customerTag) {
+        console.log('[webhook-product] ✅ Trouvé via sessionCustomerMap (sessionId)');
+        return {
+          customerTag: sessionData.customerTag,
+          customerId: sessionData.customerId,
+          source: 'sessionCustomerMap'
+        };
       }
     }
-    // Si c'est un Object
-    else if (global.designCustomerMap[designId]) {
-      const attr = global.designCustomerMap[designId];
-      console.log('[webhook-product] ✅ Trouvé via designCustomerMap (Object):', attr.customerTag);
-      return attr;
-    }
   }
-  
-  // 2) Chercher par productId si on a un mapping productId -> customer
-  if (productId && global.productCustomerMap) {
-    const productIdStr = String(productId);
-    if (global.productCustomerMap.has && global.productCustomerMap.has(productIdStr)) {
-      const attr = global.productCustomerMap.get(productIdStr);
-      console.log('[webhook-product] ✅ Trouvé via productCustomerMap:', attr.customerTag);
-      return attr;
-    }
-  }
-  
-  // 3) Session Pro active la plus récente (dans les 5 dernières minutes)
+
+  // NIVEAU 4: Fallback - Session Pro la plus récente (dans les 5 dernières minutes)
   if (global.activeProSessions && global.activeProSessions.size > 0) {
+    const FIVE_MINUTES = 5 * 60 * 1000;
     const now = Date.now();
-    let latest = null;
     
-    for (const session of global.activeProSessions.values()) {
-      const age = now - session.lastActivity;
-      if (age < 5 * 60 * 1000) { // 5 minutes
-        if (!latest || session.lastActivity > latest.lastActivity) {
-          latest = session;
-        }
-      }
-    }
+    const recentSessions = Array.from(global.activeProSessions.values())
+      .filter(s => (now - s.lastActivity) < FIVE_MINUTES)
+      .sort((a, b) => b.lastActivity - a.lastActivity);
     
-    if (latest) {
-      console.log('[webhook-product] ✅ Trouvé via session active:', latest.customerTag);
-      return latest;
+    if (recentSessions.length > 0) {
+      const latest = recentSessions[0];
+      console.log('[webhook-product] ⚠️ Trouvé via activeProSessions (fallback récent)');
+      return {
+        customerTag: latest.customerTag,
+        customerId: latest.customerId,
+        source: 'activeProSessions-fallback'
+      };
     }
   }
-  
-  // 4) Activité de design récente
-  if (global.recentDesignActivity && Array.isArray(global.recentDesignActivity)) {
-    const recent = global.recentDesignActivity[global.recentDesignActivity.length - 1];
-    if (recent && (Date.now() - recent.timestamp < 10 * 60 * 1000)) {
-      console.log('[webhook-product] ✅ Trouvé via activité récente:', recent.customerTag);
-      return recent;
-    }
-  }
-  
+
+  // Aucune attribution trouvée
   console.log('[webhook-product] ❌ Aucune attribution trouvée');
+  console.log('[webhook-product] État des Maps:', {
+    productCustomerMap: global.productCustomerMap?.size || 0,
+    designCustomerMap: global.designCustomerMap?.size || 0,
+    sessionCustomerMap: global.sessionCustomerMap?.size || 0,
+    activeProSessions: global.activeProSessions?.size || 0,
+    recentDesignActivity: global.recentDesignActivity?.size || 0
+  });
+  
   return null;
 }
 
 async function getProduct(gid) {
-  const q = `query($id: ID!){ product(id:$id){ id title tags } }`;
+  const q = `query($id: ID!){ 
+    product(id:$id){ 
+      id 
+      title 
+      tags 
+      descriptionHtml
+    } 
+  }`;
   const d = await shopifyGraphQL(q, { id: gid });
   return d.product;
 }
@@ -182,7 +178,11 @@ async function updateProduct(gid, customerTag, rename = true) {
   if (!pd) throw new Error('Produit introuvable');
 
   const existing = Array.isArray(pd.tags) ? pd.tags : [];
-  const nextTags = Array.from(new Set([...existing, customerTag, 'zakeke-attributed']));
+  
+  // Retirer les tags temporaires et ajouter le tag client + zakeke-attributed
+  const tagsToRemove = ['needs-attribution', 'zakeke-attributed'];
+  const cleanedTags = existing.filter(t => !tagsToRemove.includes(t));
+  const nextTags = Array.from(new Set([...cleanedTags, customerTag, 'zakeke-attributed']));
 
   let nextTitle = pd.title;
   if (rename) {
@@ -192,8 +192,13 @@ async function updateProduct(gid, customerTag, rename = true) {
     }
   }
 
-  // Rien à changer ?
-  const nothingToDo = (existing.length === nextTags.length) && (nextTitle === pd.title);
+  // Rien à changer ? On sort
+  const nothingToDo = (
+    existing.length === nextTags.length && 
+    existing.every(t => nextTags.includes(t)) &&
+    nextTitle === pd.title
+  );
+  
   if (nothingToDo) {
     console.log('[webhook-product] Produit déjà à jour');
     return pd;
@@ -217,18 +222,19 @@ async function updateProduct(gid, customerTag, rename = true) {
   const ue = (res.productUpdate && res.productUpdate.userErrors) || [];
   if (ue.length) {
     console.error('[webhook-product] productUpdate userErrors', ue);
-    throw new Error('productUpdate errors');
+    throw new Error('productUpdate errors: ' + JSON.stringify(ue));
   }
+  
+  console.log('[webhook-product] ✅ Produit mis à jour:', {
+    title: nextTitle,
+    tags: nextTags
+  });
   
   return res.productUpdate.product;
 }
 
-// ------------ handler ------------
+// ------------ Handler principal ------------
 module.exports = async function handler(req, res) {
-  console.log('\n═══════════════════════════════════════');
-  console.log('🎯 WEBHOOK PRODUCT REÇU');
-  console.log('═══════════════════════════════════════');
-  
   try {
     if (req.method !== 'POST') {
       return res.status(405).json({ error: 'Method not allowed' });
@@ -238,93 +244,100 @@ module.exports = async function handler(req, res) {
     const hOk = verifyShopifyHmac(raw, req.headers['x-shopify-hmac-sha256']);
     
     if (!hOk) {
-      console.warn('[webhook-product] HMAC invalid');
+      console.warn('[webhook-product] ⚠️ HMAC invalide', {
+        topic: req.headers['x-shopify-topic'],
+        shop: req.headers['x-shopify-shop-domain']
+      });
       return res.status(401).json({ error: 'Invalid HMAC' });
     }
 
     const topic = req.headers['x-shopify-topic'] || '';
-    console.log('[webhook-product] Topic:', topic);
     
     if (topic !== 'products/create' && topic !== 'products/update') {
-      return res.status(200).json({ skipped: true, reason: 'irrelevant-topic' });
+      return res.status(200).json({ 
+        skipped: true, 
+        reason: 'irrelevant-topic',
+        topic 
+      });
     }
 
     const body = JSON.parse(raw.toString('utf8'));
     
-    console.log('[webhook-product] Produit:', {
-      id: body.id,
+    console.log('[webhook-product] 🎯 Webhook reçu:', {
+      topic,
+      productId: body.id,
       title: body.title,
-      vendor: body.vendor,
       type: body.product_type
     });
-    
+
     if (!isZakekeProduct(body)) {
-      console.log('[webhook-product] Pas Zakeke, ignoré');
-      return res.status(200).json({ skipped: true, reason: 'not-zakeke' });
+      return res.status(200).json({ 
+        skipped: true, 
+        reason: 'not-zakeke',
+        productType: body.product_type 
+      });
     }
 
     const productId = body.id;
     const productGid = `gid://shopify/Product/${productId}`;
     
-    // IMPORTANT : Extraire le designId
-    const designId = extractDesignId(body);
+    // Extraire le designId depuis le HTML du produit
+    const designId = extractDesignIdFromHtml(body.body_html);
     
-    // Chercher l'attribution avec BOTH productId ET designId
-    const attr = findAttributionForProduct(productId, designId);
-    
-    if (!attr || !attr.customerTag) {
-      console.log('[webhook-product] ❌ Aucune attribution disponible');
+    console.log('[webhook-product] 📦 Produit Zakeke détecté:', {
+      productId,
+      designId: designId || 'NON TROUVÉ',
+      bodyHtmlLength: body.body_html?.length || 0
+    });
+
+    // Recherche d'attribution multi-niveaux
+    const attribution = findAttribution(productId, designId);
+
+    if (!attribution) {
+      console.log('[webhook-product] ⚠️ Aucune attribution - marquage pour review manuel');
       
-      // Optionnel : marquer pour review
-      try {
-        await updateProduct(productGid, 'needs-attribution', false);
-        console.log('[webhook-product] Produit marqué pour review manuel');
-      } catch (e) {
-        console.error('[webhook-product] Impossible de marquer:', e.message);
-      }
+      // Marquer le produit avec un tag temporaire
+      await updateProduct(productGid, 'needs-attribution', false);
       
       return res.status(200).json({ 
         skipped: true, 
         reason: 'no-attribution',
-        productId: productId,
-        designId: designId || 'not-found'
+        productId,
+        designId,
+        message: 'Produit marqué pour attribution manuelle'
       });
     }
 
-    // Mettre à jour le produit
-    const updated = await updateProduct(productGid, attr.customerTag, true);
-    
-    console.log('[webhook-product] ✅ SUCCÈS - Produit tagué:', {
-      productId: productId,
-      tag: attr.customerTag,
-      title: updated.title
+    console.log('[webhook-product] ✅ Attribution trouvée:', {
+      customerTag: attribution.customerTag,
+      customerId: attribution.customerId,
+      source: attribution.source
     });
-    
-    // Nettoyer le mapping utilisé
-    if (designId && global.designCustomerMap) {
-      if (typeof global.designCustomerMap.delete === 'function') {
-        global.designCustomerMap.delete(designId);
-      } else if (global.designCustomerMap[designId]) {
-        delete global.designCustomerMap[designId];
-      }
-      console.log('[webhook-product] Mapping design nettoyé');
-    }
-    
-    console.log('═══════════════════════════════════════\n');
-    
+
+    // Mise à jour du produit avec le tag client
+    const updated = await updateProduct(productGid, attribution.customerTag, true);
+
+    console.log('[webhook-product] 🎉 Produit tagué et renommé avec succès:', {
+      productId,
+      tag: attribution.customerTag,
+      title: updated.title,
+      source: attribution.source
+    });
+
     return res.status(200).json({ 
       success: true, 
-      productId: productId, 
-      tag: attr.customerTag,
+      productId, 
+      tag: attribution.customerTag,
+      source: attribution.source,
       title: updated.title
     });
 
   } catch (e) {
-    console.error('[webhook-product] ERREUR:', e);
-    console.log('═══════════════════════════════════════\n');
+    console.error('[webhook-product] ❌ Erreur:', e);
     return res.status(500).json({ 
       error: 'server', 
-      message: e.message 
+      message: e.message,
+      stack: process.env.NODE_ENV === 'development' ? e.stack : undefined
     });
   }
 };
