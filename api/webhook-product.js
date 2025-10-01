@@ -1,5 +1,5 @@
 // api/webhook-product.js
-// Vérifie HMAC, traite products/create & products/update, tag + rename avec recherche multi-niveaux
+// Vérifie HMAC, traite products/create & products/update, tag + rename avec retry logic
 
 const crypto = require('crypto');
 
@@ -59,7 +59,6 @@ function companyFromProTag(tag) {
 
 /**
  * Extrait le designId depuis le body_html du produit
- * Format Zakeke: <div data-zakeke-design-id="000-xxxxx">
  */
 function extractDesignIdFromHtml(bodyHtml) {
   if (!bodyHtml) return null;
@@ -80,13 +79,21 @@ function extractDesignIdFromHtml(bodyHtml) {
 }
 
 /**
- * Recherche d'attribution avec 3 niveaux de fallback
- * Retourne { customerTag, source } ou null
+ * Recherche d'attribution avec 4 niveaux de fallback
  */
 function findAttribution(productId, designId) {
-  console.log('[webhook-product] 🔍 Recherche attribution:', { productId, designId });
+  console.log('[webhook-product] 🔍 Recherche attribution:', { 
+    productId, 
+    designId,
+    mapSizes: {
+      productCustomerMap: global.productCustomerMap?.size || 0,
+      designCustomerMap: global.designCustomerMap?.size || 0,
+      sessionCustomerMap: global.sessionCustomerMap?.size || 0,
+      activeProSessions: global.activeProSessions?.size || 0
+    }
+  });
   
-  // NIVEAU 1: Recherche par productId (le plus direct)
+  // NIVEAU 1: Recherche par productId
   if (productId && global.productCustomerMap?.has(String(productId))) {
     const attr = global.productCustomerMap.get(String(productId));
     console.log('[webhook-product] ✅ Trouvé via productCustomerMap');
@@ -117,7 +124,7 @@ function findAttribution(productId, designId) {
     if (recentActivity?.sessionId && global.sessionCustomerMap) {
       const sessionData = global.sessionCustomerMap.get(recentActivity.sessionId);
       if (sessionData?.customerTag) {
-        console.log('[webhook-product] ✅ Trouvé via sessionCustomerMap (sessionId)');
+        console.log('[webhook-product] ✅ Trouvé via sessionCustomerMap');
         return {
           customerTag: sessionData.customerTag,
           customerId: sessionData.customerId,
@@ -127,7 +134,7 @@ function findAttribution(productId, designId) {
     }
   }
 
-  // NIVEAU 4: Fallback - Session Pro la plus récente (dans les 5 dernières minutes)
+  // NIVEAU 4: Fallback - Session Pro la plus récente (5 dernières minutes)
   if (global.activeProSessions && global.activeProSessions.size > 0) {
     const FIVE_MINUTES = 5 * 60 * 1000;
     const now = Date.now();
@@ -147,16 +154,7 @@ function findAttribution(productId, designId) {
     }
   }
 
-  // Aucune attribution trouvée
   console.log('[webhook-product] ❌ Aucune attribution trouvée');
-  console.log('[webhook-product] État des Maps:', {
-    productCustomerMap: global.productCustomerMap?.size || 0,
-    designCustomerMap: global.designCustomerMap?.size || 0,
-    sessionCustomerMap: global.sessionCustomerMap?.size || 0,
-    activeProSessions: global.activeProSessions?.size || 0,
-    recentDesignActivity: global.recentDesignActivity?.size || 0
-  });
-  
   return null;
 }
 
@@ -180,7 +178,7 @@ async function updateProduct(gid, customerTag, rename = true) {
   const existing = Array.isArray(pd.tags) ? pd.tags : [];
   
   // Retirer les tags temporaires et ajouter le tag client + zakeke-attributed
-  const tagsToRemove = ['needs-attribution', 'zakeke-attributed'];
+  const tagsToRemove = ['needs-attribution'];
   const cleanedTags = existing.filter(t => !tagsToRemove.includes(t));
   const nextTags = Array.from(new Set([...cleanedTags, customerTag, 'zakeke-attributed']));
 
@@ -192,7 +190,7 @@ async function updateProduct(gid, customerTag, rename = true) {
     }
   }
 
-  // Rien à changer ? On sort
+  // Rien à changer ?
   const nothingToDo = (
     existing.length === nextTags.length && 
     existing.every(t => nextTags.includes(t)) &&
@@ -233,7 +231,7 @@ async function updateProduct(gid, customerTag, rename = true) {
   return res.productUpdate.product;
 }
 
-// ------------ Handler principal ------------
+// ------------ Handler principal avec RETRY LOGIC ------------
 module.exports = async function handler(req, res) {
   try {
     if (req.method !== 'POST') {
@@ -244,10 +242,7 @@ module.exports = async function handler(req, res) {
     const hOk = verifyShopifyHmac(raw, req.headers['x-shopify-hmac-sha256']);
     
     if (!hOk) {
-      console.warn('[webhook-product] ⚠️ HMAC invalide', {
-        topic: req.headers['x-shopify-topic'],
-        shop: req.headers['x-shopify-shop-domain']
-      });
+      console.warn('[webhook-product] ⚠️ HMAC invalide');
       return res.status(401).json({ error: 'Invalid HMAC' });
     }
 
@@ -280,8 +275,6 @@ module.exports = async function handler(req, res) {
 
     const productId = body.id;
     const productGid = `gid://shopify/Product/${productId}`;
-    
-    // Extraire le designId depuis le HTML du produit
     const designId = extractDesignIdFromHtml(body.body_html);
     
     console.log('[webhook-product] 📦 Produit Zakeke détecté:', {
@@ -290,8 +283,31 @@ module.exports = async function handler(req, res) {
       bodyHtmlLength: body.body_html?.length || 0
     });
 
-    // Recherche d'attribution multi-niveaux
-    const attribution = findAttribution(productId, designId);
+    // ✅ FONCTION DE RETRY AVEC DÉLAI
+    async function findAttributionWithRetry(maxAttempts = 3, delayMs = 2000) {
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        console.log(`[webhook-product] 🔄 Tentative ${attempt}/${maxAttempts} de recherche d'attribution`);
+        
+        const attribution = findAttribution(productId, designId);
+        
+        if (attribution) {
+          console.log(`[webhook-product] ✅ Attribution trouvée à la tentative ${attempt}`);
+          return attribution;
+        }
+        
+        // Si pas trouvé et qu'il reste des tentatives, attendre
+        if (attempt < maxAttempts) {
+          console.log(`[webhook-product] ⏳ Attente de ${delayMs}ms avant nouvelle tentative...`);
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+        }
+      }
+      
+      console.log('[webhook-product] ❌ Aucune attribution trouvée après toutes les tentatives');
+      return null;
+    }
+
+    // Recherche d'attribution avec retry (3 tentatives, 2 secondes entre chaque = max 6 secondes)
+    const attribution = await findAttributionWithRetry(3, 2000);
 
     if (!attribution) {
       console.log('[webhook-product] ⚠️ Aucune attribution - marquage pour review manuel');
@@ -304,7 +320,7 @@ module.exports = async function handler(req, res) {
         reason: 'no-attribution',
         productId,
         designId,
-        message: 'Produit marqué pour attribution manuelle'
+        message: 'Produit marqué pour attribution manuelle après retry'
       });
     }
 
