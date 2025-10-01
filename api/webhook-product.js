@@ -83,13 +83,18 @@ async function updateProduct(gid, customerTag, rename = true) {
   const pd = await getProduct(gid);
   if (!pd) throw new Error('Produit introuvable');
 
-  const tags = Array.from(new Set([...(pd.tags || []), customerTag]));
+  const existing = Array.isArray(pd.tags) ? pd.tags : [];
+  const nextTags = Array.from(new Set([...existing, customerTag]));
 
-  let title = pd.title;
+  let nextTitle = pd.title;
   if (rename) {
     const comp = companyFromProTag(customerTag);
-    if (comp && !title.includes(comp)) title = `${title} - ${comp}`;
+    if (comp && !nextTitle.includes(comp)) nextTitle = `${nextTitle} - ${comp}`;
   }
+
+  // Rien à changer ? On sort. Pas de mutation inutile → pas de boucle.
+  const nothingToDo = (existing.length === nextTags.length) && (nextTitle === pd.title);
+  if (nothingToDo) return pd;
 
   const m = `mutation($input: ProductInput!){
     productUpdate(input:$input){
@@ -97,7 +102,7 @@ async function updateProduct(gid, customerTag, rename = true) {
       userErrors{ field message }
     }
   }`;
-  const res = await shopifyGraphQL(m, { input: { id: gid, tags, title } });
+  const res = await shopifyGraphQL(m, { input: { id: gid, tags: nextTags, title: nextTitle } });
   const ue = (res.productUpdate && res.productUpdate.userErrors) || [];
   if (ue.length) {
     console.error('[webhook-product] productUpdate userErrors', ue);
