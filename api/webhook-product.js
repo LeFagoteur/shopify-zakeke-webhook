@@ -38,7 +38,7 @@ async function shopifyGraphQL(query, variables = {}) {
       'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({ query, variables })
+    : JSON.stringify({ query, variables })
   });
   const data = await r.json();
   if (data.errors) throw new Error(JSON.stringify(data.errors));
@@ -257,6 +257,8 @@ module.exports = async function handler(req, res) {
     }
 
     const body = JSON.parse(raw.toString('utf8'));
+    
+    console.log('[webhook-product] BODY COMPLET:', JSON.stringify(body, null, 2));
     
     console.log('[webhook-product] 🎯 Webhook reçu:', {
       topic,
