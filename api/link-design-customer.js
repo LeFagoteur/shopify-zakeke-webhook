@@ -1,5 +1,6 @@
 // api/link-design-customer.js
-// Lie design/productId au client + TAGUE le produit IMMÉDIATEMENT (pas besoin d’attendre le webhook)
+// Lie design/productId au client + TAGUE le produit IMMÉDIATEMENT (sans attendre le webhook)
+// + Renommage: "Tag Entreprise - Titre Produit"
 
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN_REGEX
   ? new RegExp(process.env.ALLOWED_ORIGIN_REGEX)
@@ -48,7 +49,19 @@ async function shopifyGraphQL(query, variables = {}) {
 
 function companyFromProTag(tag) {
   const raw = String(tag || '').replace(/^pro[-_]?/i, '');
-  return raw.replace(/[-_]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').trim();
+  return raw
+    .replace(/[-_]+/g, ' ')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .trim();
+}
+
+function capitalizeFirst(str) {
+  if (!str) return '';
+  return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
+function escapeRe(s) {
+  return String(s).replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
 }
 
 async function getProduct(gid) {
@@ -70,13 +83,31 @@ async function tagProductNow(productIdNum, customerTag, rename = true, retries =
       const nextTags = Array.from(new Set([...cleaned, customerTag, 'zakeke-attributed']));
 
       let nextTitle = pd.title;
+
       if (rename) {
-        const comp = companyFromProTag(customerTag);
-        if (comp && !nextTitle.includes(comp)) nextTitle = `${nextTitle} - ${comp}`;
+        const compRaw = companyFromProTag(customerTag);
+        if (compRaw) {
+          const compCap = capitalizeFirst(compRaw);
+
+          // Si l’ancien format "Produit - comp" existe, on l’enlève
+          const suffixRe = new RegExp(`\\s*-\\s*${escapeRe(compRaw)}$`, 'i');
+          const suffixCapRe = new RegExp(`\\s*-\\s*${escapeRe(compCap)}$`, 'i');
+
+          let baseTitle = pd.title.replace(suffixRe, '').replace(suffixCapRe, '').trim();
+
+          // Si déjà en préfixe correct "Comp - Titre", ne rien refaire
+          const prefixRe = new RegExp(`^${escapeRe(compCap)}\\s*-\\s*`, 'i');
+          if (!prefixRe.test(baseTitle)) {
+            nextTitle = `${compCap} - ${baseTitle}`;
+          } else {
+            nextTitle = baseTitle;
+          }
+        }
       }
 
       // évite les updates inutiles
-      const nothing = (existing.length === nextTags.length && existing.every(t => nextTags.includes(t))) && nextTitle === pd.title;
+      const sameTags = (existing.length === nextTags.length) && existing.every(t => nextTags.includes(t));
+      const nothing = sameTags && nextTitle === pd.title;
       if (nothing) return { ok: true, reason: 'nothing-to-do', title: pd.title, tags: nextTags };
 
       const m = `mutation($input: ProductInput!){
@@ -135,7 +166,7 @@ module.exports = async function handler(req, res) {
     if (productId) global.productCustomerMap.set(String(productId), attrib);
     gcMaps();
 
-    // TAG IMMÉDIAT si on a le productId
+    // TAG & RENOMMAGE IMMÉDIATS si on a le productId
     let tagging = null;
     if (productId) {
       tagging = await tagProductNow(productId, customerTag, true, 6, 1500);
