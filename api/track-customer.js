@@ -1,164 +1,109 @@
 // api/track-customer.js
-// Tracking de l'activité client Pro (CommonJS • Vercel • sans deps externes)
+// Tracking client Pro: silencieux, dédoublonné, rate-limité (CommonJS)
 
-// ------------------------
-// Config CORS (restreint)
-// ------------------------
+const BLACKLISTED_TAGS = ['membre-pro', 'membre-premium', 'membre-gratuit'];
+
+// CORS permissif mais sain (ajuste si tu veux serrer)
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN_REGEX
   ? new RegExp(process.env.ALLOWED_ORIGIN_REGEX)
-  : /^https:\/\/([a-z0-9-]+\.)*lefagoteur\.com$/i; // ex: www.lefagoteur.com
+  : /.*/;
 
 function setCors(req, res) {
   const origin = req.headers.origin || '';
-  if (ALLOWED_ORIGIN.test(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-  }
+  if (ALLOWED_ORIGIN.test(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
   res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With');
 }
 
-// ------------------------
-// Stockage en mémoire
-// ------------------------
-if (!global.activeProSessions) {
-  global.activeProSessions = new Map(); // customerId -> sessionData
-}
-const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+// Stockage en mémoire (volatile, c’est voulu)
+if (!global.activeProSessions) global.activeProSessions = new Map(); // customerId -> sessionData
+if (!global.lastActionMap)     global.lastActionMap     = new Map(); // key(customerId+action) -> ts
 
-function gcSessions() {
-  const now = Date.now();
-  for (const [id, session] of global.activeProSessions.entries()) {
-    if (now - session.lastActivity > SESSION_TIMEOUT_MS) {
-      global.activeProSessions.delete(id);
-    }
-  }
-}
+const SESSION_TTL_MS   = 30 * 60 * 1000; // 30 min
+const ACTION_COOLDOWN  = 5 * 1000;       // 5 s par couple (customerId, action) pour calmer le spam
 
-// ------------------------
-// Utils
-// ------------------------
-const BLACKLISTED_TAGS = ['membre-pro', 'membre-premium', 'membre-gratuit'];
-
-function normalizeBody(body) {
-  if (!body) return {};
-  if (typeof body === 'string') {
-    try { return JSON.parse(body); } catch { return {}; }
-  }
-  return body;
-}
-
-function toArrayTags(tags) {
-  if (!tags) return [];
-  if (Array.isArray(tags)) return tags.map(t => String(t).trim()).filter(Boolean);
-  return String(tags)
-    .split(',')
-    .map(t => t.trim())
-    .filter(Boolean);
-}
-
-function extractValidProTag(tags) {
-  const tagArray = toArrayTags(tags);
-  const pro = tagArray.find(tag =>
-    tag &&
-    tag.toLowerCase().startsWith('pro') &&
-    !BLACKLISTED_TAGS.includes(tag) &&
-    tag.length > 3
-  );
+function isValidProTagArray(tags) {
+  if (!tags) return null;
+  const arr = Array.isArray(tags) ? tags : String(tags).split(',').map(t => String(t).trim());
+  const pro = arr.find(tag => tag && tag.toLowerCase().startsWith('pro') && !BLACKLISTED_TAGS.includes(tag));
   return pro || null;
 }
 
-// "proMaSuperBoite" → "MaSuperBoite" (tu utilises ça pour info/renommage côté produit)
 function extractCompanyName(tag) {
   if (!tag) return '';
-  const t = String(tag);
-  if (!t.toLowerCase().startsWith('pro')) return '';
-  return t.slice(3);
+  return String(tag).replace(/^pro[-_]?/i, '')
+    .replace(/[-_]+/g, ' ')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .trim();
 }
 
-// ------------------------
-// Handler
-// ------------------------
+function gcSessions() {
+  const now = Date.now();
+  for (const [id, s] of global.activeProSessions.entries()) {
+    if (now - s.lastActivity > SESSION_TTL_MS) global.activeProSessions.delete(id);
+  }
+  for (const [k, ts] of global.lastActionMap.entries()) {
+    if (now - ts > SESSION_TTL_MS) global.lastActionMap.delete(k);
+  }
+}
+
+function parseBody(body) {
+  if (!body) return {};
+  if (typeof body === 'string') { try { return JSON.parse(body); } catch { return {}; } }
+  return body;
+}
+
 module.exports = async function handler(req, res) {
   setCors(req, res);
-
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
-  if (req.method !== 'POST' && req.method !== 'GET') {
-    return res.status(405).json({ error: 'Method not allowed' });
-  }
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST')    return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    // GET (debug facultatif): /api/track-customer?customerId=xxx
-    if (req.method === 'GET') {
-      const id = (req.query && req.query.customerId) || '';
-      if (!id) {
-        return res.status(200).json({
-          sessions: global.activeProSessions.size,
-          timeoutMs: SESSION_TIMEOUT_MS
-        });
-      }
-      const session = global.activeProSessions.get(id) || null;
-      return res.status(200).json({
-        exists: !!session,
-        session,
-        timeoutMs: SESSION_TIMEOUT_MS
-      });
-    }
+    const { customerId, customerEmail, customerTags, action = 'activity' } = parseBody(req.body) || {};
+    // Pas de données minimales -> on se tait (204), inutile de polluer en 400
+    if (!customerId || !customerEmail) return res.status(204).end();
 
-    // POST
-    const { customerId, customerEmail, customerTags, action = 'activity' } = normalizeBody(req.body);
+    const validTag = isValidProTagArray(customerTags);
+    // Non-Pro -> 204 silencieux
+    if (!validTag) return res.status(204).end();
 
-    if (!customerId || !customerEmail) {
-      return res.status(400).json({ error: 'Missing customerId or customerEmail' });
-    }
-
-    const validTag = extractValidProTag(customerTags);
-    if (!validTag) {
-      // On répond 200 pour ne pas spammer les erreurs front, mais on indique l’état
-      return res.status(200).json({
-        success: false,
-        reason: 'not-pro',
-        message: 'Not a valid Pro customer',
-      });
-    }
+    // Rate-limit basique par couple (customerId, action)
+    const key = `${customerId}:${action}`;
+    const now = Date.now();
+    const last = global.lastActionMap.get(key) || 0;
+    if (now - last < ACTION_COOLDOWN) return res.status(204).end();
+    global.lastActionMap.set(key, now);
 
     const companyName = extractCompanyName(validTag);
 
+    // Enregistrer/rafraîchir la session
     const sessionData = {
       customerId,
-      customerEmail,           // À éviter dans les logs bruts
+      customerEmail,
       customerTag: validTag,
       companyName,
-      lastActivity: Date.now(),
-      lastAction: action,
-      sessionId: `${customerId}_${Date.now()}`
+      lastActivity: now,
+      action,
+      sessionId: `${customerId}_${now}`
     };
-
     global.activeProSessions.set(customerId, sessionData);
     gcSessions();
 
-    // Logs sobres (RGPD friendly): on masque l’email
-    const masked = String(customerEmail).replace(/(^.).*(@.*$)/, '$1***$2');
-    console.log('[track-customer] updated', {
-      customerId,
-      email: masked,
-      tag: validTag,
-      action
-    });
+    // Log discret pour debug, réponse 200 uniquement quand on garde quelque chose
+    console.log('[track-customer] updated', { customerId, action });
 
     return res.status(200).json({
       success: true,
       sessionId: sessionData.sessionId,
       customerTag: validTag,
       companyName,
-      expiresInMs: SESSION_TIMEOUT_MS
+      expiresInMs: SESSION_TTL_MS
     });
-
   } catch (err) {
     console.error('[track-customer] error', err);
-    return res.status(500).json({ error: 'Internal server error', message: err.message });
+    // Erreur réelle -> 500, pas 400
+    return res.status(500).json({ error: 'server', message: err.message });
   }
 };
