@@ -38,7 +38,7 @@ async function shopifyGraphQL(query, variables = {}) {
       'X-Shopify-Access-Token': SHOPIFY_ACCESS_TOKEN,
       'Content-Type': 'application/json'
     },
-    : JSON.stringify({ query, variables })
+    body: JSON.stringify({ query, variables })
   });
   const data = await r.json();
   if (data.errors) throw new Error(JSON.stringify(data.errors));
