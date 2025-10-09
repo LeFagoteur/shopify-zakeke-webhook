@@ -1,7 +1,7 @@
 // api/link-design-customer.js
 // Lie design/productId au client + TAG/RENAME immédiats
 // Nettoyage: supprime 'needs-attribution' et 'zakeke-attributed'
-// Réconcilie *-1M / *-2M selon `markings` (1 ou 2)
+// Réconcilie *-1M / *-2M selon `markings` (1 ou 2) et accepte `baseMmTags` depuis le front
 
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN_REGEX
   ? new RegExp(process.env.ALLOWED_ORIGIN_REGEX)
@@ -20,11 +20,11 @@ function setCors(req, res) {
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Requested-With');
 }
 
+// caches éphémères pour raccrocher les wagons entre front et webhooks (si tu en utilises ailleurs)
 if (!global.designCustomerMap)  global.designCustomerMap  = new Map();
 if (!global.productCustomerMap) global.productCustomerMap = new Map();
 
 const TTL_MS = 60 * 60 * 1000;
-
 function gcMaps() {
   const now = Date.now();
   for (const [k, v] of global.designCustomerMap.entries())  if (now - v.createdAt > TTL_MS) global.designCustomerMap.delete(k);
@@ -34,6 +34,7 @@ function gcMaps() {
 const BLACKLISTED = ['membre-pro','membre-premium','membre-gratuit'];
 const isValidPro = t => !!t && t.toLowerCase().startsWith('pro') && !BLACKLISTED.includes(t) && t.length > 3;
 
+// --- Shopify GraphQL helper ---
 async function shopifyGraphQL(query, variables = {}) {
   const r = await fetch(`https://${SHOPIFY_SHOP_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`, {
     method: 'POST',
@@ -48,49 +49,57 @@ async function shopifyGraphQL(query, variables = {}) {
   return data.data;
 }
 
+// --- Formatage titre ---
 function companyFromProTag(tag) {
   const raw = String(tag || '').replace(/^pro[-_]?/i, '');
   return raw.replace(/[-_]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').trim();
 }
-function capitalizeFirst(str) { return str ? str.charAt(0).toUpperCase() + str.slice(1) : ''; }
-function escapeRe(s) { return String(s).replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&'); }
+const capitalizeFirst = s => s ? s.charAt(0).toUpperCase() + s.slice(1) : '';
+const escapeRe = s => String(s).replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
 
+// --- Product fetch ---
 async function getProduct(gid) {
   const q = `query($id: ID!){ product(id:$id){ id title tags } }`;
   const d = await shopifyGraphQL(q, { id: gid });
   return d.product;
 }
 
-// Garde seulement les tags finissant par -1M ou -2M selon markings.
-// Aucun tag 1M/2M -> on ne touche pas. Un seul type présent -> remplace si besoin.
+// --- 1M / 2M helpers ---
+const isMm = t => /-[12]M$/i.test(t);
+
+// Fusionne les tags 1M/2M existants avec les tags "graine" du produit source
+function mergeBaseMmTags(existing, base) {
+  const out = new Set(existing);
+  (Array.isArray(base) ? base : []).forEach(t => { if (isMm(t)) out.add(t); });
+  return Array.from(out);
+}
+
+// Garde uniquement le bon suffixe selon markings, en convertissant si besoin
 function reconcileDealeasyTags(existingTags, markings) {
   const keepSuffix = Number(markings) >= 2 ? '2M' : '1M';
   const oneM = existingTags.filter(t => /-1M$/i.test(t));
   const twoM = existingTags.filter(t => /-2M$/i.test(t));
+
+  // si aucun tag 1M/2M n’existe, on ne touche pas
   if (!oneM.length && !twoM.length) return Array.from(new Set(existingTags));
 
-  const out = [];
-  for (const t of existingTags) if (!/-[12]M$/i.test(t)) out.push(t);
-
-  if (oneM.length && twoM.length) {
-    for (const t of (keepSuffix === '2M' ? twoM : oneM)) out.push(t);
-    return Array.from(new Set(out));
+  // retire tous les 1M/2M
+  const base = existingTags.filter(t => !isMm(t));
+  // on garde/convertit selon la cible
+  if (keepSuffix === '2M') {
+    if (twoM.length) return Array.from(new Set([...base, ...twoM]));
+    // convertir 1M -> 2M
+    return Array.from(new Set([...base, ...oneM.map(t => t.replace(/-1M$/i, '-2M'))]));
+  } else {
+    if (oneM.length) return Array.from(new Set([...base, ...oneM]));
+    // convertir 2M -> 1M
+    return Array.from(new Set([...base, ...twoM.map(t => t.replace(/-2M$/i, '-1M'))]));
   }
-  if (keepSuffix === '2M' && oneM.length && !twoM.length) {
-    for (const t of oneM) out.push(t.replace(/-1M$/i, '-2M'));
-    return Array.from(new Set(out));
-  }
-  if (keepSuffix === '1M' && twoM.length && !oneM.length) {
-    for (const t of twoM) out.push(t.replace(/-2M$/i, '-1M'));
-    return Array.from(new Set(out));
-  }
-  const keep = keepSuffix === '2M' ? twoM : oneM;
-  for (const t of keep) out.push(t);
-  return Array.from(new Set(out));
 }
 
+// --- Mise à jour immédiate du produit ---
 async function tagProductNow(productIdNum, customerTag, options = {}) {
-  const { rename = true, markings = null, retries = 6, waitMs = 1500 } = options;
+  const { rename = true, markings = null, baseMmTags = [], retries = 6, waitMs = 1500 } = options;
   const gid = `gid://shopify/Product/${productIdNum}`;
 
   for (let i = 1; i <= retries; i++) {
@@ -98,19 +107,22 @@ async function tagProductNow(productIdNum, customerTag, options = {}) {
       const pd = await getProduct(gid);
       if (!pd) throw new Error('Produit introuvable');
 
-      const existing = Array.isArray(pd.tags) ? pd.tags : [];
-      // 1) nettoyage: jamais besoin de ces deux-là
-      let cleaned = existing.filter(t => t !== 'needs-attribution' && t !== 'zakeke-attributed');
+      // 1) nettoyage basique
+      let tags = Array.isArray(pd.tags) ? pd.tags : [];
+      tags = tags.filter(t => t !== 'needs-attribution' && t !== 'zakeke-attributed');
 
-      // 2) tag client pro, si absent
-      if (customerTag && !cleaned.includes(customerTag)) cleaned.push(customerTag);
+      // 2) injecte le tag client
+      if (customerTag && !tags.includes(customerTag)) tags.push(customerTag);
 
-      // 3) réconciliation 1M/2M si markings fourni
-      if (markings === 1 || markings === 2) cleaned = reconcileDealeasyTags(cleaned, markings);
+      // 3) merge des tags 1M/2M venant du produit source
+      tags = mergeBaseMmTags(tags, baseMmTags);
 
-      const nextTags = Array.from(new Set(cleaned));
+      // 4) réconcilie 1M/2M selon `markings`
+      if (markings === 1 || markings === 2) tags = reconcileDealeasyTags(tags, markings);
 
-      // 4) titre: "Client - Produit" + suffixe " - 2 marquages" si markings=2
+      const nextTags = Array.from(new Set(tags));
+
+      // 5) titre "Client - Produit" + " - 2 marquages" si nécessaire
       let nextTitle = pd.title;
       if (rename && customerTag) {
         const compCap = capitalizeFirst(companyFromProTag(customerTag));
@@ -128,12 +140,12 @@ async function tagProductNow(productIdNum, customerTag, options = {}) {
         nextTitle = nextTitle.slice(0, -twoSuffix.length);
       }
 
-      // 5) idempotence
-      const sameTags = (existing.length === nextTags.length) && existing.every(t => nextTags.includes(t));
-      const nothing = sameTags && nextTitle === pd.title;
+      // 6) idempotence
+      const sameTags = (pd.tags || []).length === nextTags.length && (pd.tags || []).every(t => nextTags.includes(t));
+      const nothing = sameTags && pd.title === nextTitle;
       if (nothing) return { ok: true, reason: 'nothing-to-do', title: pd.title, tags: nextTags };
 
-      // 6) mutation
+      // 7) mutation
       const m = `mutation($input: ProductInput!){
         productUpdate(input:$input){
           product{ id title tags }
@@ -141,11 +153,8 @@ async function tagProductNow(productIdNum, customerTag, options = {}) {
         }
       }`;
       const res = await shopifyGraphQL(m, { input: { id: gid, tags: nextTags, title: nextTitle } });
-      const ue = (res.productUpdate && res.productUpdate.userErrors) || [];
-      if (ue.length) {
-        console.error('[link-design-customer] productUpdate userErrors', ue);
-        throw new Error('productUpdate errors');
-      }
+      const ue = res.productUpdate?.userErrors || [];
+      if (ue.length) throw new Error('productUpdate errors: ' + JSON.stringify(ue));
       return { ok: true, title: nextTitle, tags: nextTags };
     } catch (e) {
       if (i === retries) return { ok: false, error: e.message };
@@ -154,12 +163,14 @@ async function tagProductNow(productIdNum, customerTag, options = {}) {
   }
 }
 
+// --- util ---
 function parseBody(body) {
   if (!body) return {};
   if (typeof body === 'string') { try { return JSON.parse(body); } catch { return {}; } }
   return body;
 }
 
+// --- Handler ---
 module.exports = async function handler(req, res) {
   setCors(req, res);
   if (req.method === 'OPTIONS') return res.status(200).end();
@@ -176,12 +187,28 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    const { designId, customerId, customerEmail, customerTag, productId, markings, timestamp } = parseBody(req.body);
+    const {
+      designId,
+      customerId,
+      customerEmail,
+      customerTag,
+      productId,
+      markings,          // 1 ou 2
+      baseMmTags,        // ["TS-CC-IN-1M", "TS-CC-IN-2M"] éventuellement
+      timestamp
+    } = parseBody(req.body);
+
     if (!customerId || !customerEmail) return res.status(400).json({ error: 'Missing customerId or customerEmail' });
     if (!isValidPro(customerTag))  return res.status(200).json({ success: false, reason: 'not-pro' });
     if (!designId && !productId)   return res.status(400).json({ error: 'Missing designId or productId' });
 
-    const attrib = { customerId, customerEmail, customerTag, productId: productId || null, createdAt: Date.now(), from: 'link-design-customer', sourceTs: timestamp || null };
+    const attrib = {
+      customerId, customerEmail, customerTag,
+      productId: productId || null,
+      createdAt: Date.now(),
+      from: 'link-design-customer',
+      sourceTs: timestamp || null
+    };
     if (designId) global.designCustomerMap.set(designId, attrib);
     if (productId) global.productCustomerMap.set(String(productId), attrib);
     gcMaps();
@@ -190,8 +217,15 @@ module.exports = async function handler(req, res) {
     if (productId) {
       const mk = Number(markings);
       const mkNorm = (mk === 1 || mk === 2) ? mk : null;
-      tagging = await tagProductNow(productId, customerTag, { rename: true, markings: mkNorm, retries: 6, waitMs: 1500 });
-      console.log('[link-design-customer] productUpdate immediate', { productId, markings: mkNorm, result: tagging });
+      const seed = Array.isArray(baseMmTags) ? baseMmTags.filter(isMm) : [];
+      tagging = await tagProductNow(productId, customerTag, {
+        rename: true,
+        markings: mkNorm,
+        baseMmTags: seed,
+        retries: 6,
+        waitMs: 1500
+      });
+      console.log('[link-design-customer] productUpdate immediate', { productId, markings: mkNorm, seed, result: tagging });
     }
 
     return res.status(200).json({
