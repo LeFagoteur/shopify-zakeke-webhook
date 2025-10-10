@@ -186,7 +186,8 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    const { designId, customerId, customerEmail, customerTag, productId, markings, baseMmTags } = parseBody(req.body);
+    const { designId, customerId, customerEmail, customerTag, productId, markings, baseMmTags, seedSource } = parseBody(req.body);
+    console.log('[link-design-customer] <- payload', { productId, markings, seedSource, baseMmTags });
     if (!customerId || !customerEmail) return res.status(400).json({ error: 'Missing customerId or customerEmail' });
     if (!isValidPro(customerTag))  return res.status(200).json({ success: false, reason: 'not-pro' });
     if (!designId && !productId)   return res.status(400).json({ error: 'Missing designId or productId' });
